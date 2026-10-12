@@ -4,7 +4,7 @@ import pytest
 
 from satin_agent.assets.cma import State, publish_cma
 from satin_agent.assets.gcs import publish_gcs
-from satin_agent.assets.load import AssetError, load_assets, sha256
+from satin_agent.assets.load import AssetError, load_assets
 from tests.fakes import FakeAnthropic, FakeObjectStore
 
 
@@ -41,16 +41,61 @@ def test_stdio_mcp_rejected(tmp_path):
         load_assets(tmp_path)
 
 
-def test_gcs_publish_manifest_last_and_prunes(tmp_path):
+def _bundle(store):
+    import io
+    import zipfile
+
+    return zipfile.ZipFile(io.BytesIO(store.data["assets.zip"]))
+
+
+def test_gcs_publish_writes_single_zip_and_prunes_legacy(tmp_path):
     assets = load_assets(make_assets(tmp_path))
-    store = FakeObjectStore({"skills/old/SKILL.md": b"x"})
-    manifest = publish_gcs(assets, store)
-    assert store.write_log[-1] == "manifest.json"
-    assert "skills/old/SKILL.md" not in store.data
-    assert set(store.data) == {*manifest["files"], "manifest.json"}
-    for key, h in manifest["files"].items():
-        assert sha256(store.data[key]) == h
-    assert "skills/report-writer/SKILL.md" in store.data
+    store = FakeObjectStore(
+        {"skills/old/SKILL.md": b"x", "manifest.json": b"{}", "CLAUDE.md": b"legacy"}
+    )
+    result = publish_gcs(assets, store)
+    assert set(store.data) == {"assets.zip"}
+    assert result["bundle"] == "assets.zip" and result["bytes"] == len(store.data["assets.zip"])
+    zf = _bundle(store)
+    assert sorted(zf.namelist()) == sorted(assets.files()) == sorted(result["files"])
+    assert zf.testzip() is None
+    for name, data in assets.files().items():
+        assert zf.read(name) == data
+    assert "skills/report-writer/SKILL.md" in zf.namelist()
+    assert "manifest.json" not in zf.namelist()
+
+
+def test_gcs_publish_is_deterministic(tmp_path):
+    assets = load_assets(make_assets(tmp_path))
+    a, b = FakeObjectStore(), FakeObjectStore()
+    publish_gcs(assets, a)
+    publish_gcs(assets, b)
+    assert a.data["assets.zip"] == b.data["assets.zip"]
+
+
+def test_gcs_publish_keeps_legacy_objects_if_the_write_fails(tmp_path):
+    assets = load_assets(make_assets(tmp_path))
+    store = FakeObjectStore({"manifest.json": b"{}"})
+
+    def boom(key, data):
+        raise OSError("write failed")
+
+    store.write = boom
+    with pytest.raises(OSError):
+        publish_gcs(assets, store)
+    assert "manifest.json" in store.data
+
+
+def test_gcs_bundle_marks_shebang_files_executable(tmp_path):
+    root = make_assets(tmp_path)
+    (root / "skills" / "bq-query" / "run.py").write_text("#!/usr/bin/env python3\nprint(1)\n")
+    (root / "skills" / "bq-query" / "data.txt").write_text("plain\n")
+    store = FakeObjectStore()
+    publish_gcs(load_assets(root), store)
+    zf = _bundle(store)
+    mode = lambda n: zf.getinfo(n).external_attr >> 16  # noqa: E731
+    assert mode("skills/bq-query/run.py") & 0o111
+    assert not mode("skills/bq-query/data.txt") & 0o111
 
 
 def test_cma_second_publish_adds_version_not_duplicate_skill(tmp_path):

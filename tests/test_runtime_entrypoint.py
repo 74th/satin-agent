@@ -58,10 +58,10 @@ async def test_cma_runs_handler_with_work_after_startup(tmp_path):
     assert workdir == env["SATIN_WORKSPACE"] and leaked is None
 
 
-async def test_assets_mismatch_exits_without_worker(tmp_path, capsys):
+async def test_broken_assets_bundle_exits_without_worker(tmp_path, capsys):
     store = FakeObjectStore()
     publish_gcs(load_assets(make_assets(tmp_path / "src")), store)
-    store.data["CLAUDE.md"] = b"tampered"
+    store.data["assets.zip"] = store.data["assets.zip"][:-30]
     called = []
 
     async def handler(*a):
@@ -70,7 +70,7 @@ async def test_assets_mismatch_exits_without_worker(tmp_path, capsys):
     env = base_env(tmp_path, "cma", SATIN_ASSETS_URL="gs://b/p/")
     rc = await run(env, store_factory=lambda url: store, cma_handler=handler)
     assert rc == 3 and not called
-    assert "CLAUDE.md" in capsys.readouterr().err
+    assert "assets.zip" in capsys.readouterr().err
 
 
 async def test_startup_failure_blocks_worker_unless_configured(tmp_path):
@@ -177,3 +177,26 @@ def test_main_mode_arg_overrides_env(monkeypatch, capsys):
 async def test_missing_run_info_is_error(tmp_path, mode):
     env = {"SATIN_MODE": mode, "SATIN_RUN_DIR": str(tmp_path / "none")}
     assert await run(env) == 2
+
+
+async def test_cc_places_skills_and_claude_md_from_the_bundle_and_runs_startup(
+    tmp_path, monkeypatch
+):
+    src = make_assets(tmp_path / "src")
+    (src / "startup.sh").write_text('#!/bin/sh\necho "$SATIN_MODE" > "$PWD/startup-ran"\n')
+    store = FakeObjectStore()
+    publish_gcs(load_assets(src), store)
+    seen = []
+
+    async def fake_run_cc(cfg, **kw):
+        seen.append(cfg)
+        return 0
+
+    monkeypatch.setattr("satin_agent.runtime.entrypoint.run_cc", fake_run_cc)
+    host = tmp_path / "host"
+    env = base_env(tmp_path, "cc", SATIN_ASSETS_URL="gs://b/p/", SATIN_HOST_CONFIG_DIR=str(host))
+    assert await run(env, store_factory=lambda u: store) == 0
+    assert (host / "skills/report-writer/SKILL.md").is_file()
+    assert (host / "CLAUDE.md").read_text() == "# rules\n"
+    assert (tmp_path / "ws" / "startup-ran").read_text().strip() == "cc"
+    assert seen and seen[0].host_config_dir == str(host)

@@ -65,8 +65,10 @@ def publish(args: argparse.Namespace, cfg: Config) -> int:
         url = cfg.get("assets.gcs_url")
         if not url:
             raise ConfigError("設定の assets.gcs_url（gs://bucket/prefix/）が必要です")
-        manifest = publish_gcs(assets, GcsStore(url, cfg.get("gcp.project")))
-        print(f"[gcs] {url}: {len(manifest['files'])} files")
+        result = publish_gcs(assets, GcsStore(url, cfg.get("gcp.project")))
+        print(
+            f"[gcs] {url}{result['bundle']}: {len(result['files'])} files, {result['bytes']} bytes"
+        )
     if "cma" in targets:
         state = State(Path(cfg.get("assets.state_file", ".satin-state.json")))
         agent = publish_cma(

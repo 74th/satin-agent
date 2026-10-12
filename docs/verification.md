@@ -210,3 +210,13 @@ uv run python -m verification.make_report
 | (B) Claude Code self-hosted runnerからEcho MCP | 合格。claude.aiでself-hosted Environmentを選んで始めたセッションで、Echoツールの呼び出しが成功し「こんにちは12345」がそのまま返った。クラスタ側の確認: Sandboxはモード`cc`、KSA `satin-bq-sandbox`で作成、環境変数`ECHO_MCP_API_KEY`はSecret（`echo-mcp-api-key`）から供給、`startup.sh`がホスト設定ディレクトリの`.claude.json`にMCPを登録（鍵は環境変数の参照のみで、ファイルには書かれていない）、Sandboxの`-pods`のNetworkPolicyが作られ、Echoのログにツールの引数の検証の記録（初回の呼び出しで引数名を誤り、再試行で成功）。runnerはホスト設定ディレクトリの`.claude.json`を読む（`.mcp.json`は不要だった） |
 
 注: この検証のPodは、配備を入れ替えずに作った一時のPod（`runtimeClassName: gvisor`）で、オーケストレータが作るSandboxではない。そのため、`bigquery.googleapis.com`のFQDN許可（Sandbox単位のNetworkPolicy）は、ここでは経路として確かめていない（単体テストで描画だけを確認）。Podは検証後に削除した。
+
+## アセットのzip化（bundle-assets-as-zip）
+
+実施日: 2026-10-12。クラスタ: `gke_nnyn-dev_us-central1-a_silk-agent-gke`。
+
+| 項目 | 結果 |
+|---|---|
+| 切り替え（イメージのpush → `satin publish --target gcs` → `scripts/deploy.sh` → `satin sandbox gc --all`） | 実施。`gs://nnyn-dev-satin-agent-assets/satin/default/`には`assets.zip`だけが残った（従来のファイルと`manifest.json`は削除された）。古いSandbox 3件を削除 |
+| (A) Sandbox内のツール実行・Skillの利用（`results/zip-bundle-20261012-174221.json`） | 合格。新しいイメージのSandboxが`assets.zip`を取得・展開して起動し、`container-probe`のSkillで識別子`satin-runtime-zip1`を答えた |
+| (B) SkillsとCLAUDE.mdの読み込み | 合格。claude.aiのself-hosted Environmentで始めたセッションで、`container-probe`のSkillにより識別子`satin-runtime-zip1`が返った。Sandbox（モード`cc`）では、`assets.zip`の展開結果が`/workspace/.satin/assets`に、SkillsとCLAUDE.mdがホスト設定ディレクトリ（`~/.claude-host`）に置かれ、CLAUDE.mdの内容（日本語・絵文字なし）も反映されていた |

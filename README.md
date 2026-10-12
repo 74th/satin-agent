@@ -87,6 +87,7 @@ uv run ruff check . && uv run ruff format --check . && uv run pyrefly check
 1. `terraform/`（`terraform plan`を確認してから`apply`）: アセットのバケット、Artifact Registry、Bot / Sandboxの権限（Workload Identity）、DLP・Model Armorのテンプレート。
 2. イメージ: `scripts/build-images.sh [tag]`（ランタイム `docker/runtime.Dockerfile`、アプリ `docker/app.Dockerfile`）。
 3. アセットの配布: `satin publish --config satin.yaml --assets assets --target cma,gcs`。
+   - GCSの配置を`manifest.json`と個別のファイルから`assets.zip`へ変えた版への切り替え: 新しいイメージをpushし、`satin publish --target gcs`（古いオブジェクトは自動で削除される）、`scripts/deploy.sh`の順に、続けて行う。古いイメージで作られた中断中のSandboxは、再開すると新しい配置を読めず失敗するので、`satin sandbox gc --all`で消す。
 4. Secret: `KUBE_CONTEXT=<context> scripts/deploy-secrets.sh`（`.env`から作る。HMAC鍵は既存を維持）。
 5. クラスタに適用: `KUBE_CONTEXT=<context> scripts/deploy.sh [tag]`（`k8s/overlays/dev`）。
 
@@ -109,7 +110,7 @@ assets/
 ```
 
 - (A): Skills APIへ登録（再配布は新バージョン、Agentにはlatestで付ける）、`CLAUDE.md`はAgentのシステムプロンプトへ。Skillsの場所（`/workspace/skills/`）を伝える定型文を加える。
-- (A)(B)共通: GCSへ同じ相対パスで置き、`manifest.json`（ハッシュ）を最後に書く。Sandboxは起動時に取り出してハッシュを照合し、一致しなければ起動しない。(B)ではホスト設定ディレクトリ（`SELF_HOSTED_RUNNER_HOST_CONFIG_DIR`）に置くので、リポジトリの有無にかかわらず全セッションが読む。
+- (A)(B)共通: アセット全体を1つのzip（`assets.zip`、同じ内容なら同じバイト列）にして、GCSの配布先へ1オブジェクトとして置く（配布先のそれ以外のオブジェクトは削除する）。Sandboxは起動時にzipを1回で取り出し、読み込み・CRC・パス（絶対パスや`..`は拒否）を検査してから展開し、失敗したら起動しない。(B)ではホスト設定ディレクトリ（`SELF_HOSTED_RUNNER_HOST_CONFIG_DIR`）に置くので、リポジトリの有無にかかわらず全セッションが読む。
 - `startup.sh`: ワーカーの前に毎回、`/workspace`で実行する。環境変数は`SATIN_MODE`・`SATIN_SESSION_ID`・`SATIN_FIRST_RUN`（1/0）・`AGENT_USER_EMAIL`。失敗するとワーカーを起動しない（`SATIN_STARTUP_CONTINUE_ON_FAILURE=1`で続行）。
 - ツールを足すときは、`docker/runtime.Dockerfile`のイメージを`FROM`にしたイメージを作り、`sandbox.image`に設定する。
 - `AGENT_USER_EMAIL`: Botがセッションの作成時に、会話を始めたSlackユーザのメールを対応表（ConfigMap、HMAC付き）に書き、オーケストレータがSandboxの環境変数にする。(B)は`CLAUDE_RUNNER_ACCOUNT_EMAIL`。

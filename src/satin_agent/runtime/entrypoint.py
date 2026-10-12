@@ -23,7 +23,7 @@ from collections.abc import Callable, Mapping
 from pathlib import Path
 
 from ..ports import ObjectStore
-from .assets import AssetMismatchError, fetch_assets, place_for_claude_code
+from .assets import AssetBundleError, fetch_assets, place_for_claude_code
 from .modes import (
     MODES,
     CcConfig,
@@ -75,7 +75,7 @@ async def run(
             store_factory = GcsStore
         try:
             fetched = fetch_assets(store_factory(url), workspace / ".satin" / "assets")
-        except AssetMismatchError as e:
+        except AssetBundleError as e:
             _log(str(e))
             return 3
         startup_script = fetched.startup_sh

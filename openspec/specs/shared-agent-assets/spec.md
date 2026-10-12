@@ -35,11 +35,19 @@ Skills・CLAUDE.md・`startup.sh`を1つのアセットディレクトリで管�
 - **THEN** Agentのバージョンが1つ上がり、そのシステムプロンプトに変更後の`CLAUDE.md`の内容とSkillsの置き場所の説明が含まれる
 
 ### Requirement: GCSへのアップロード
-配布スクリプトは、Skills・`CLAUDE.md`・`startup.sh`を、設定したGCSの場所へ、アセットディレクトリと同じ相対パスでアップロードしなければならない (SHALL)。アップロードの完了後に、配布した内容の一覧とハッシュを記したマニフェストを最後に書き込まなければならない (SHALL)。GCS上にあってアセットディレクトリにないファイルは削除しなければならない (SHALL)。
+配布スクリプトは、Skills・`CLAUDE.md`・`startup.sh`・`mcp.json`（あれば）を、アセットディレクトリと同じ相対パスで1つのzipにまとめ、設定したGCSの場所へ1つのオブジェクト`assets.zip`としてアップロードしなければならない (SHALL)。zipの内容が同じなら、バイト列も同じでなければならない (SHALL)。配布先の場所にある`assets.zip`以外のオブジェクト（従来のファイルや`manifest.json`を含む）は、アップロードの完了後に削除しなければならない (SHALL)。
 
 #### Scenario: GCSへの配布
 - **WHEN** 配布先を`gs://<bucket>/satin/default/`として配布する
-- **THEN** `gs://<bucket>/satin/default/skills/report-writer/SKILL.md`、`.../CLAUDE.md`、`.../startup.sh`、`.../manifest.json`が存在し、マニフェストの各ハッシュはアップロードしたファイルと一致する
+- **THEN** `gs://<bucket>/satin/default/assets.zip`だけが存在し、zipには`skills/report-writer/SKILL.md`、`CLAUDE.md`、`startup.sh`がアセットディレクトリと同じ相対パスで含まれる
+
+#### Scenario: 従来の配置からの切り替え
+- **WHEN** 配布先に従来のファイルと`manifest.json`が残っている状態で配布する
+- **THEN** `assets.zip`が書き込まれ、従来のファイルと`manifest.json`は削除される
+
+#### Scenario: 同じ内容の再配布
+- **WHEN** アセットを変更せずに、配布スクリプトを2回実行する
+- **THEN** どちらも同じ内容の`assets.zip`になる
 
 ### Requirement: 配布先の選択と結果の記録
 配布スクリプトは、(A)のManaged AgentsとGCSのそれぞれを配布先として個別に選べなければならない (SHALL)。作成・更新したリソースのID（Skill ID、Agent IDとバージョン）を状態ファイルに保存し、次回の実行で再利用しなければならない (SHALL)。状態ファイルとログにAPIキーなどの秘密情報を書いてはならない (SHALL NOT)。

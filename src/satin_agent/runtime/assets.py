@@ -2,19 +2,19 @@
 
 from __future__ import annotations
 
-import json
+import io
 import shutil
+import stat
+import zipfile
 from dataclasses import dataclass
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 
-from ..assets.load import sha256
+from ..assets.gcs import BUNDLE
 from ..ports import NotFoundError, ObjectStore
 
 
-class AssetMismatchError(Exception):
-    def __init__(self, files: list[str]) -> None:
-        super().__init__("マニフェストと一致しないファイル: " + ", ".join(files))
-        self.files = files
+class AssetBundleError(Exception):
+    """assets.zipがない・読めない・壊れている・不正なパスを含む。ワーカーは起動しない。"""
 
 
 @dataclass(frozen=True)
@@ -23,33 +23,51 @@ class FetchedAssets:
     startup_sh: Path | None
 
 
-def fetch_assets(store: ObjectStore, dest: Path) -> FetchedAssets:
-    """マニフェストに記されたファイルを取り出し、ハッシュを照合する。
-
-    一致しないファイルがあれば`AssetMismatchError`（ワーカーは起動しない）。
-    展開は一時ディレクトリで行い、照合に成功してから`dest`と入れ替える。
-    """
-    manifest = json.loads(store.read("manifest.json"))
-    files: dict[str, bytes] = {}
-    bad: list[str] = []
-    for key, expected in sorted(manifest["files"].items()):
-        try:
-            data = store.read(key)
-        except NotFoundError:
-            bad.append(key)
-            continue
-        if sha256(data) != expected:
-            bad.append(key)
-        files[key] = data
+def _check_names(zf: zipfile.ZipFile) -> None:
+    """展開先の外へ出るパス（絶対パス・`..`・バックスラッシュ）や、通常のファイル以外を拒否する。"""
+    bad = []
+    for info in zf.infolist():
+        name = info.filename
+        parts = PurePosixPath(name).parts
+        mode = info.external_attr >> 16
+        if (
+            not name
+            or name.startswith("/")
+            or "\\" in name
+            or ".." in parts
+            or (mode and not stat.S_ISREG(mode) and not info.is_dir())
+        ):
+            bad.append(name)
     if bad:
-        raise AssetMismatchError(bad)
+        raise AssetBundleError("不正なパスのエントリを含みます: " + ", ".join(sorted(bad)))
 
-    tmp = dest.with_name(dest.name + ".tmp")
-    shutil.rmtree(tmp, ignore_errors=True)
-    for key, data in files.items():
-        p = tmp / key
-        p.parent.mkdir(parents=True, exist_ok=True)
-        p.write_bytes(data)
+
+def fetch_assets(store: ObjectStore, dest: Path) -> FetchedAssets:
+    """`assets.zip`を1回で取り出して検査し、一時ディレクトリへ展開してから`dest`と入れ替える。
+
+    ない・壊れている・不正なパスを含むときは`AssetBundleError`（何も展開せず、ワーカーは起動しない）。
+    """
+    try:
+        data = store.read(BUNDLE)
+    except NotFoundError as e:
+        raise AssetBundleError(f"{BUNDLE} がありません") from e
+    try:
+        zf = zipfile.ZipFile(io.BytesIO(data))
+    except zipfile.BadZipFile as e:
+        raise AssetBundleError(f"{BUNDLE} がzipとして読めません: {e}") from e
+    with zf:
+        _check_names(zf)
+        if (broken := zf.testzip()) is not None:
+            raise AssetBundleError(f"{BUNDLE} の中身が壊れています: {broken}")
+        tmp = dest.with_name(dest.name + ".tmp")
+        shutil.rmtree(tmp, ignore_errors=True)
+        for info in zf.infolist():
+            if info.is_dir():
+                continue
+            p = tmp / info.filename
+            p.parent.mkdir(parents=True, exist_ok=True)
+            p.write_bytes(zf.read(info))
+            p.chmod((info.external_attr >> 16) & 0o777 or 0o644)
     shutil.rmtree(dest, ignore_errors=True)
     dest.parent.mkdir(parents=True, exist_ok=True)
     tmp.rename(dest)
