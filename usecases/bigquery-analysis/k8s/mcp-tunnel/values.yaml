@@ -1,0 +1,37 @@
+# MCP tunnels (research preview) for the Echo MCP. Chart version is pinned in scripts/deploy-tunnel.sh.
+# External mode: tunnel token and server certificate come from Secrets made by
+# scripts/create-tunnel-secrets.sh. No tunnel domain or secret lives in this file;
+# the domain is passed with --set gateway.config.tunnel_domain=<domain> at install time.
+setup:
+  enabled: false
+
+external:
+  tunnelTokenSecretName: mcp-tunnel-token   # key: tunnel-token
+  serverCertSecretName: mcp-tunnel-cert     # keys: tls.crt, tls.key
+
+gateway:
+  replicaCount: 2
+  config:
+    # https://echo.<tunnel domain>/mcp -> Echo MCP Service
+    routes:
+      echo: http://echo-mcp.satin-mcp.svc.cluster.local:8080
+    upstream:
+      # RFC 1918 plus the cluster Service CIDR. GKE's Service CIDR can be outside RFC 1918;
+      # confirm it (README: `kubectl get svc kubernetes`) and add it here if so.
+      allowed_ips:
+        - 10.0.0.0/8
+        - 172.16.0.0/12
+        - 192.168.0.0/16
+
+networkPolicy:
+  ingress:
+    enabled: true            # default-deny ingress to the proxy pod
+  egress:
+    enabled: true            # cloudflared -> tunnel edge, gateway -> Echo MCP only
+    mcpServers:
+      - labels: {app.kubernetes.io/name: echo-mcp}
+        namespace: satin-mcp
+        port: 8080
+    cloudflaredEgressCIDRs:
+      - 198.41.192.0/19
+      - 2606:4700:a0::/44

@@ -63,7 +63,11 @@ def render_sandbox(
         "service_account": cfg.service_account,
         "image": cfg.image,
         "image_pull_policy": cfg.image_pull_policy,
-        "env": env_list(env),
+        "env": env_list(env)
+        + [
+            {"name": n, "valueFrom": {"secretKeyRef": {"name": secret, "key": key}}}
+            for n, secret, key in cfg.secret_env
+        ],
         "cpu_request": cfg.cpu_request,
         "memory_request": cfg.memory_request,
         "cpu_limit": cfg.cpu_limit,

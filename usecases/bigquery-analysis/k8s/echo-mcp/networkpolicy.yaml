@@ -1,0 +1,28 @@
+# Echo MCP accepts connections only from the mcp-tunnel proxy pod (Helm release "mcp-tunnel",
+# namespace "mcp-tunnel") and from Sandbox pods (Claude Code in (B) connects directly), and makes no
+# outbound connections. Every request still needs the API key.
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: echo-mcp
+  namespace: satin-mcp
+spec:
+  podSelector:
+    matchLabels: {app.kubernetes.io/name: echo-mcp}
+  policyTypes: [Ingress, Egress]
+  ingress:
+    - from:
+        - namespaceSelector:
+            matchLabels: {kubernetes.io/metadata.name: mcp-tunnel}
+          podSelector:
+            matchLabels:
+              app.kubernetes.io/name: mcp-tunnel
+              app.kubernetes.io/instance: mcp-tunnel
+              app.kubernetes.io/component: gateway
+        - namespaceSelector:
+            matchLabels: {kubernetes.io/metadata.name: satin-sandboxes}
+          podSelector:
+            matchExpressions:
+              - {key: satin.dev/sandbox, operator: Exists}
+      ports:
+        - {protocol: TCP, port: 8080}

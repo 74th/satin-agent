@@ -1,0 +1,23 @@
+[project]
+name = "echo-mcp"
+version = "0.1.0"
+description = "Echo MCP server with API key authentication (satin-agent BigQuery analysis use case)"
+requires-python = ">=3.12"
+dependencies = [
+  "fastmcp==4.1.0",
+  "uvicorn>=0.30",
+]
+
+[dependency-groups]
+dev = ["pytest>=8.4", "pytest-asyncio>=1.0", "httpx>=0.27"]
+
+[build-system]
+requires = ["setuptools>=77"]
+build-backend = "setuptools.build_meta"
+
+[tool.setuptools]
+packages = ["echo_mcp"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+asyncio_mode = "auto"

@@ -173,6 +173,7 @@ async def run_bot(cfg: Config, env: Mapping[str, str] | None = None) -> int:
                 AsyncAnthropic(api_key=anthropic_api_key(e)),
                 agent_id=agent_id,
                 environment_id=env_id,
+                vault_ids=[str(v) for v in (cfg.get("agent.vault_ids") or [])],
             ),
             store=store,
             channel=SlackChat(app.client),

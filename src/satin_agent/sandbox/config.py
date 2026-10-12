@@ -30,6 +30,10 @@ class SandboxConfig:
     # NetworkPolicy: 許可するFQDN（DNS・Anthropic API・GCSは常に許可）
     allowed_fqdns: tuple[str, ...] = field(default_factory=tuple)
     extra_env: tuple[tuple[str, str], ...] = field(default_factory=tuple)
+    # Secretの値を環境変数に渡す（名前, Secret名, キー）。Secretはsandbox namespaceに置く。
+    secret_env: tuple[tuple[str, str, str], ...] = field(default_factory=tuple)
+    # 送信を許可するクラスタ内のPod: {"namespace", "labels", "port"}（FQDNでは指定できない宛先）
+    allowed_pods: tuple[dict, ...] = field(default_factory=tuple)
 
     @classmethod
     def from_config(cls, cfg: Config) -> SandboxConfig:
@@ -59,4 +63,9 @@ class SandboxConfig:
             assets_url=cfg.get("assets.gcs_url", "") or "",
             allowed_fqdns=tuple(sb.get("allowed_fqdns", ())),
             extra_env=tuple((str(a), str(b)) for a, b in (sb.get("env", {}) or {}).items()),
+            secret_env=tuple(
+                (str(n), str(ref["secret"]), str(ref["key"]))
+                for n, ref in (sb.get("secret_env", {}) or {}).items()
+            ),
+            allowed_pods=tuple(dict(p) for p in (sb.get("allowed_pods", []) or [])),
         )

@@ -84,6 +84,7 @@ def render_policies(cfg: SandboxConfig, *, sandbox: str) -> list[dict[str, Any]]
                 ],
             },
         },
+        *_pod_policies(cfg, meta, sandbox),
         {
             "apiVersion": "networking.gke.io/v1alpha1",
             "kind": "FQDNNetworkPolicy",
@@ -98,6 +99,37 @@ def render_policies(cfg: SandboxConfig, *, sandbox: str) -> list[dict[str, Any]]
                 ],
             },
         },
+    ]
+
+
+def _pod_policies(cfg: SandboxConfig, meta, sandbox: str) -> list[dict[str, Any]]:
+    """設定で許可したクラスタ内のPod（namespace・ラベル・TCPポート）への送信。"""
+    if not cfg.allowed_pods:
+        return []
+    return [
+        {
+            "apiVersion": "networking.k8s.io/v1",
+            "kind": "NetworkPolicy",
+            "metadata": meta("pods"),
+            "spec": {
+                "podSelector": _selector(sandbox),
+                "policyTypes": ["Egress"],
+                "egress": [
+                    {
+                        "to": [
+                            {
+                                "namespaceSelector": {
+                                    "matchLabels": {"kubernetes.io/metadata.name": p["namespace"]}
+                                },
+                                "podSelector": {"matchLabels": dict(p["labels"])},
+                            }
+                        ],
+                        "ports": [{"protocol": "TCP", "port": int(p["port"])}],
+                    }
+                    for p in cfg.allowed_pods
+                ],
+            },
+        }
     ]
 
 

@@ -1,0 +1,84 @@
+# Runtime configuration for the BigQuery analysis use case (no secrets here).
+# Swapped in for k8s/overlays/dev: same namespaces, Environment and Slack app, different Agent.
+agent:
+  id: "__AGENT_ID__"   # filled by scripts/deploy.sh from .satin-state.json
+  name: satin-bigquery-agent
+  vault_ids:
+    - "__VAULT_ID__"   # filled by scripts/deploy.sh from vault_id in the state file
+  model: claude-haiku-5-5
+  bash_always_ask: true   # the Bot answers bash confirmations (bulk-file guard)
+
+gcp:
+  project: nnyn-dev
+
+assets:
+  state_file: .satin-state-bigquery.json
+  gcs_url: gs://nnyn-dev-satin-agent-assets/satin/bigquery-analysis/
+
+kubernetes:
+  sandbox_namespace: satin-sandboxes
+
+sandbox:
+  image: us-central1-docker.pkg.dev/nnyn-dev/satin-agent/satin-runtime-bq:dev
+  runtime_class: gvisor
+  service_account: satin-bq-sandbox   # Workload Identity -> Terraform-managed GSA
+  storage: 10Gi
+  storage_class: standard-rwo
+  ready_timeout: 180
+  # bashの既定（timeout_ms未指定のとき）と、1回のツール呼び出しの上限。SDKの既定は120秒/150秒。
+  bash_default_timeout_seconds: 3600
+  bash_max_timeout_seconds: 7200
+  allowed_fqdns:
+    - bigquery.googleapis.com
+  # (B): Claude Code in the Sandbox reaches the Echo MCP directly (no tunnel) with this key.
+  secret_env:
+    ECHO_MCP_API_KEY: {secret: echo-mcp-api-key, key: api-key}   # Secret in satin-sandboxes
+  allowed_pods:
+    - namespace: satin-mcp
+      labels: {app.kubernetes.io/name: echo-mcp}
+      port: 8080
+  retention_seconds: 7200   # dev: 2 hours (default 7 days)
+  env:
+    BIGQUERY_JOB_PROJECT: nnyn-dev
+    SATIN_CMA_MAX_IDLE: "10"
+    SATIN_CC_RELEASE_IDLE_MIN: "10"
+    SATIN_CC_DRAIN_WAIT_SEC: "60"
+
+cma:
+  max_concurrency: 5
+  # 未確認応答（ack前）のwork itemの再配信までの時間。落ちたワーカーのリースの失効（約5分、
+  # サーバ側）には影響しない（実測で確認）。
+  reclaim_older_than_ms: 300000
+
+cc:
+  resync_seconds: 30
+
+slack:
+  db_path: /data/satin-bot.db
+  timezone: Asia/Tokyo   # 進捗メッセージの「最終更新」の時刻（IANAのタイムゾーン名）
+  heartbeat_seconds: 60
+
+guards:
+  filters:
+    teams: []
+    channels: []
+    users: []
+    allow_direct_messages: true
+    deny_guests: false
+    deny_external_users: false
+    max_chars: 8000
+    rate_limit_per_minute: 20
+  input_guard:
+    enabled: true
+    model: gemini-3.8-flash
+    project: nnyn-dev
+    location: global
+    fail_open: false
+  output_inspection:
+    enabled: true
+    template: projects/nnyn-dev/locations/us-central1/templates/satin-simple
+    location: us-central1
+
+hooks:
+  - factory: json_lines
+    options: {include_body: false}

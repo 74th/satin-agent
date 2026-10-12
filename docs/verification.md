@@ -193,3 +193,20 @@ uv run python verification/bot_confirm_restart.py <slack-channel-id>
 # 5. この文書の自動シナリオの表を更新
 uv run python -m verification.make_report
 ```
+
+## BigQuery分析ユースケース（usecases/bigquery-analysis）
+
+実施日: 2026-10-12。クラスタ: `gke_nnyn-dev_us-central1-a_silk-agent-gke`。
+
+| 項目 | 結果 |
+|---|---|
+| Terraform（GSA・IAM）の適用 | 5リソースを追加。GSAは`satin-bq-sandbox@nnyn-dev.iam.gserviceaccount.com` |
+| KSAの注釈 | `satin-sandboxes/satin-bq-sandbox`に`iam.gke.io/gcp-service-account`が付き、`automountServiceAccountToken: false`。Terraformのなりすまし許可（`nnyn-dev.svc.id.goog[satin-sandboxes/satin-bq-sandbox]`）と一致 |
+| gVisor Pod（KSA `satin-bq-sandbox`）で`run_query.py` | 成功（終了コード0）。列は`refresh_date`・`rank`・`term`、10行、日付の降順・順位の昇順 |
+| gVisor Pod（既定のKSA `satin-sandbox`）で`run_query.py` | `permission`（`bigquery.jobs.create`なし）、終了コード4。結果は出力されない |
+| Echo MCPへの直接接続（6.3） | 合格。Sandboxのラベルを付けたPodから、`X_API_KEY`・Bearerとも正しい鍵で200、鍵なし・誤りで401。Sandbox以外のPod（default namespace）からは接続できない（タイムアウト） |
+| トンネル経由のManaged Agents（6.4） | 見送り（MCP tunnelsは利用申請が未承認。(A)のMCPは断念。回避策はRESTのAPIをcurlで呼ぶ） |
+| Managed Agentsのセッションから分析を依頼（Slackなし、`usecases/bigquery-analysis/scripts/verify_cma.py`、`results/bigquery-cma-20261012-170606.json`） | 合格。エージェントが`run_query.py`を実行し、10行すべての検索語と日付（2026-10-11）・取得条件を回答に含めた。Pod（オーケストレータが作ったSandbox）のKSAは`satin-bq-sandbox`。背景は推測と断り、確認できないと述べた。これにより、Sandbox単位のNetworkPolicyで`bigquery.googleapis.com`への通信が通ることも確かめた |
+| (B) Claude Code self-hosted runnerからEcho MCP | 合格。claude.aiでself-hosted Environmentを選んで始めたセッションで、Echoツールの呼び出しが成功し「こんにちは12345」がそのまま返った。クラスタ側の確認: Sandboxはモード`cc`、KSA `satin-bq-sandbox`で作成、環境変数`ECHO_MCP_API_KEY`はSecret（`echo-mcp-api-key`）から供給、`startup.sh`がホスト設定ディレクトリの`.claude.json`にMCPを登録（鍵は環境変数の参照のみで、ファイルには書かれていない）、Sandboxの`-pods`のNetworkPolicyが作られ、Echoのログにツールの引数の検証の記録（初回の呼び出しで引数名を誤り、再試行で成功）。runnerはホスト設定ディレクトリの`.claude.json`を読む（`.mcp.json`は不要だった） |
+
+注: この検証のPodは、配備を入れ替えずに作った一時のPod（`runtimeClassName: gvisor`）で、オーケストレータが作るSandboxではない。そのため、`bigquery.googleapis.com`のFQDN許可（Sandbox単位のNetworkPolicy）は、ここでは経路として確かめていない（単体テストで描画だけを確認）。Podは検証後に削除した。

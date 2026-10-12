@@ -1,0 +1,3 @@
+project_id         = "your-project"
+assets_bucket_name = "your-project-satin-agent-assets"
+# job_project_id   = "billing-project"   # 未指定ならproject_id

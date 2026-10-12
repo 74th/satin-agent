@@ -1,0 +1,19 @@
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+resources:
+  - ../../../../k8s/base
+  - sandbox-serviceaccount.yaml
+# The app image tag is set by scripts/deploy.sh. Use with:
+#   OVERLAY=usecases/bigquery-analysis/k8s/overlay SATIN_STATE=.satin-state-bigquery.json \
+#   GSA_EMAIL=<terraform output gsa_email> scripts/deploy.sh
+images:
+  - name: satin-app
+    newName: us-central1-docker.pkg.dev/nnyn-dev/satin-agent/satin-app
+    newTag: dev
+configMapGenerator:
+  - name: satin-config
+    namespace: satin-system
+    files:
+      - satin.yaml
+generatorOptions:
+  disableNameSuffixHash: true

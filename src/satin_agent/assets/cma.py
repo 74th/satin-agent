@@ -55,11 +55,21 @@ def agent_config(
     }
     if bash_always_ask:
         toolset["configs"].append({"name": "bash", "permission_policy": {"type": "always_ask"}})
+    tools: list[dict[str, Any]] = [toolset]
+    for server in mcp_servers:
+        # always_allow: Botはbash以外のツール確認に応答しない
+        tools.append(
+            {
+                "type": "mcp_toolset",
+                "mcp_server_name": server["name"],
+                "default_config": {"permission_policy": {"type": "always_allow"}},
+            }
+        )
     cfg: dict[str, Any] = {
         "name": name,
         "model": model,
         "system": system,
-        "tools": [toolset],
+        "tools": tools,
         # versionは指定しない(latest)。明示するとワーカーのダウンロードが失敗する不具合がある。
         "skills": [{"type": "custom", "skill_id": s} for s in skill_ids],
     }

@@ -99,3 +99,36 @@ def test_bash_always_ask_only_for_bash(tmp_path):
     assert tools["default_config"]["permission_policy"] == {"type": "always_allow"}
     asks = [c for c in tools["configs"] if c.get("permission_policy")]
     assert asks == [{"name": "bash", "permission_policy": {"type": "always_ask"}}]
+
+
+def test_mcp_servers_get_always_allow_mcp_toolset(tmp_path):
+    root = make_assets(tmp_path / "a")
+    (root / "mcp.json").write_text(
+        json.dumps(
+            {
+                "mcp_servers": [
+                    {"type": "url", "name": "echo", "url": "https://echo.example/mcp"},
+                    {"type": "url", "name": "other", "url": "https://other.example/mcp"},
+                ]
+            }
+        )
+    )
+    api, state = FakeAnthropic(), State(tmp_path / "s.json")
+    a = publish_cma(load_assets(root), api, state)
+    cfg = api.agents[a["id"]]["config"]
+    assert [s["name"] for s in cfg["mcp_servers"]] == ["echo", "other"]
+    toolsets = [t for t in cfg["tools"] if t["type"] == "mcp_toolset"]
+    assert [t["mcp_server_name"] for t in toolsets] == ["echo", "other"]
+    assert all(
+        t["default_config"]["permission_policy"] == {"type": "always_allow"} for t in toolsets
+    )
+
+
+def test_no_mcp_servers_leaves_tools_unchanged(tmp_path):
+    root = make_assets(tmp_path / "a")
+    (root / "mcp.json").write_text(json.dumps({"mcp_servers": []}))
+    api, state = FakeAnthropic(), State(tmp_path / "s.json")
+    a = publish_cma(load_assets(root), api, state)
+    cfg = api.agents[a["id"]]["config"]
+    assert "mcp_servers" not in cfg
+    assert [t["type"] for t in cfg["tools"]] == ["agent_toolset_20260401"]

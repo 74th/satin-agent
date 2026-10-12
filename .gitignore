@@ -13,3 +13,4 @@ __pycache__/
 *.tfplan
 .satin-state-verify.json
 .satin-state-verify-sonnet.json
+.satin-state-bigquery.json

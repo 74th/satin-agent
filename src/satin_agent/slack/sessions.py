@@ -9,14 +9,25 @@ from .ports import SessionBusy
 
 
 class AnthropicSessions:
-    def __init__(self, client: Any, *, agent_id: str, environment_id: str) -> None:
+    def __init__(
+        self,
+        client: Any,
+        *,
+        agent_id: str,
+        environment_id: str,
+        vault_ids: list[str] | None = None,
+    ) -> None:
         self._c = client  # AsyncAnthropic
         self._agent_id = agent_id
         self._env_id = environment_id
+        self._vault_ids = list(vault_ids or [])
 
     async def create(self, metadata: dict[str, str]) -> str:
+        kwargs: dict[str, Any] = {}
+        if self._vault_ids:
+            kwargs["vault_ids"] = self._vault_ids
         s = await self._c.beta.sessions.create(
-            agent=self._agent_id, environment_id=self._env_id, metadata=metadata
+            agent=self._agent_id, environment_id=self._env_id, metadata=metadata, **kwargs
         )
         return s.id
 
