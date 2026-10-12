@@ -1,0 +1,4 @@
+#!/bin/sh
+# claude self-hosted-runner orchestrator の spawn-runner フック。
+# 環境変数 CLAUDE_RUNNER_* はorchestratorが渡す。Sandboxの起動を指示して、準備完了を待たずに返す。
+exec satin cc spawn --config "${SATIN_CONFIG:-/etc/satin/satin.yaml}"

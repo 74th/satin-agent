@@ -1,0 +1,11 @@
+# The Bot keeps thread -> session mappings and turn state in SQLite (single instance).
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: satin-slack-bot-data
+  namespace: satin-system
+spec:
+  accessModes: [ReadWriteOnce]
+  resources:
+    requests:
+      storage: 1Gi

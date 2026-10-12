@@ -1,0 +1,64 @@
+[project]
+name = "satin-agent"
+version = "0.1.0"
+description = "Session-scoped GKE Agent Sandboxes for Claude Managed Agents and Claude Code self-hosted environments"
+readme = "README.md"
+requires-python = ">=3.12"
+dependencies = [
+  "anthropic>=0.80",
+  "kubernetes-asyncio>=35,<36",
+  "google-cloud-storage>=2.18",
+  "slack-bolt>=1.21",
+  "slack-sdk>=3.33",
+  "aiohttp>=3.14,<4",
+  "PyYAML>=6.0.2,<7",
+  "google-genai>=2.29.0",
+  "google-cloud-modelarmor>=0.7.2",
+  "tzdata>=2026.5",
+]
+
+[project.scripts]
+satin = "satin_agent.cli:main"
+satin-sandbox = "satin_agent.runtime.entrypoint:main"
+
+[dependency-groups]
+dev = [
+  "pytest>=8.4",
+  "pytest-asyncio>=1.0",
+  "ruff>=0.8",
+  "pyrefly>=0.40",
+  "typesafe-sdk",
+]
+
+[build-system]
+requires = ["setuptools>=77"]
+build-backend = "setuptools.build_meta"
+
+[tool.setuptools]
+package-dir = {"" = "src"}
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.setuptools.package-data]
+satin_agent = ["templates/*.yaml", "guards/*.md"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+pythonpath = ["."]
+asyncio_mode = "auto"
+addopts = "-m 'not live' --import-mode=importlib"
+markers = [
+  "live: calls real external services (Anthropic, Jev, GKE); run with -m live",
+]
+
+[tool.ruff]
+line-length = 100
+target-version = "py312"
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "UP", "B"]
+
+[tool.pyrefly]
+project-includes = ["src", "tests"]
+search-path = ["src", "."]

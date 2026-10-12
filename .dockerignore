@@ -1,0 +1,9 @@
+.venv
+.git
+.env
+secrets
+.satin-state.json
+__pycache__
+tests
+openspec
+xprivate

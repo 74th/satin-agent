@@ -1,0 +1,69 @@
+"""外部依存のport。ユニットテストでは`tests/fakes.py`の偽物に差し替える。"""
+
+from __future__ import annotations
+
+from collections.abc import AsyncIterator
+from typing import Any, Protocol
+
+
+class Clock(Protocol):
+    def now(self) -> float: ...
+    async def sleep(self, seconds: float) -> None: ...
+
+
+class ObjectStore(Protocol):
+    """GCS相当。キーはprefixからの相対パス。"""
+
+    def read(self, key: str) -> bytes: ...
+    def write(self, key: str, data: bytes) -> None: ...
+    def delete(self, key: str) -> None: ...
+    def list(self) -> list[str]: ...
+
+
+class ConflictError(Exception):
+    """resourceVersionの不一致、または作成時の既存。"""
+
+
+class NotFoundError(Exception):
+    pass
+
+
+class KubeApi(Protocol):
+    """Sandbox CR / Secret / PVCなど、名前空間つきオブジェクトの最小操作。
+
+    kindは"sandbox" / "secret" / "pvc" / "networkpolicy" / "configmap"などの短い名前。
+    オブジェクトはKubernetesのJSON形（dict）で、`metadata.resourceVersion`を持つ。
+    """
+
+    async def get(self, kind: str, name: str) -> dict[str, Any]: ...
+    async def list(self, kind: str, label_selector: str | None = None) -> list[dict[str, Any]]: ...
+    async def create(self, kind: str, obj: dict[str, Any]) -> dict[str, Any]: ...
+    async def replace(self, kind: str, obj: dict[str, Any]) -> dict[str, Any]: ...
+    async def patch(self, kind: str, name: str, patch: dict[str, Any]) -> dict[str, Any]: ...
+    async def delete(self, kind: str, name: str) -> None: ...
+    def watch(self, kind: str, label_selector: str | None = None) -> AsyncIterator[dict[str, Any]]:
+        """{"type": ADDED|MODIFIED|DELETED, "object": {...}} を流す。切断で例外か終了。"""
+        ...
+
+
+class AnthropicPort(Protocol):
+    """Managed Agents / Skills APIの最小操作（実体は`anthropic.Anthropic`の薄いラッパー）。
+
+    filesは「アップロード名 → 内容」。Skillは`<skill名>/SKILL.md`の形で渡す。
+    """
+
+    def create_skill(self, display_name: str, files: dict[str, bytes]) -> dict[str, Any]: ...
+    def add_skill_version(self, skill_id: str, files: dict[str, bytes]) -> dict[str, Any]: ...
+    def get_agent(self, agent_id: str) -> dict[str, Any]: ...
+    def create_agent(self, config: dict[str, Any]) -> dict[str, Any]: ...
+    def update_agent(
+        self, agent_id: str, version: int, config: dict[str, Any]
+    ) -> dict[str, Any]: ...
+
+
+class SlackPort(Protocol):
+    async def post(self, channel: str, thread_ts: str | None, text: str) -> str: ...
+    async def update(self, channel: str, ts: str, text: str) -> None: ...
+    async def upload(
+        self, channel: str, thread_ts: str | None, filename: str, text: str
+    ) -> None: ...

@@ -1,0 +1,58 @@
+apiVersion: agents.x-k8s.io/v1beta1
+kind: Sandbox
+metadata:
+  labels:
+    app.kubernetes.io/managed-by: satin-agent
+spec:
+  podTemplate:
+    spec:
+      # 処理（work item / runnerの1割り当て）の終了 = Podの終了。再起動させない。
+      restartPolicy: Never
+      # SIGTERM後、実行中のツールの結果を送る（または user.interrupt を送る）猶予
+      terminationGracePeriodSeconds: 60
+      runtimeClassName: {$param: runtime_class}
+      serviceAccountName: {$param: service_account}
+      automountServiceAccountToken: false
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 1000
+        runAsGroup: 1000
+        fsGroup: 1000
+        seccompProfile:
+          type: RuntimeDefault
+      containers:
+        - name: satin
+          image: {$param: image}
+          imagePullPolicy: {$param: image_pull_policy}
+          env: {$param: env}
+          securityContext:
+            allowPrivilegeEscalation: false
+            capabilities:
+              drop: [ALL]
+          volumeMounts:
+            - name: workspace
+              mountPath: /workspace
+            - name: run
+              mountPath: /run/satin
+              readOnly: true
+          resources:
+            requests:
+              cpu: {$param: cpu_request}
+              memory: {$param: memory_request}
+            limits:
+              cpu: {$param: cpu_limit}
+              memory: {$param: memory_limit}
+      volumes:
+        - name: run
+          secret:
+            secretName: {$param: run_secret_name}
+            defaultMode: 292  # 0444
+  volumeClaimTemplates:
+    - metadata:
+        name: workspace
+      spec:
+        storageClassName: {$param: storage_class}
+        accessModes: [ReadWriteOnce]
+        resources:
+          requests:
+            storage: {$param: storage}

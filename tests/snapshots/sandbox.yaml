@@ -1,0 +1,76 @@
+apiVersion: agents.x-k8s.io/v1beta1
+kind: Sandbox
+metadata:
+  annotations:
+    satin.dev/env-hash: h
+    satin.dev/generation: '1'
+    satin.dev/session-id: sesn_X
+  labels:
+    app.kubernetes.io/managed-by: satin-agent
+    satin.dev/mode: cma
+    satin.dev/session: a274cb82f8
+  name: satin-a274cb82f8-g1
+  namespace: satin-sandboxes
+spec:
+  podTemplate:
+    metadata:
+      labels:
+        satin.dev/sandbox: satin-a274cb82f8-g1
+        satin.dev/session: a274cb82f8
+    spec:
+      automountServiceAccountToken: false
+      containers:
+      - env:
+        - name: AGENT_USER_EMAIL
+          value: a@b.c
+        - name: SATIN_MODE
+          value: cma
+        - name: SATIN_SESSION_ID
+          value: sesn_X
+        image: img:1
+        imagePullPolicy: IfNotPresent
+        name: satin
+        resources:
+          limits:
+            cpu: '1'
+            memory: 2Gi
+          requests:
+            cpu: 250m
+            memory: 512Mi
+        securityContext:
+          allowPrivilegeEscalation: false
+          capabilities:
+            drop:
+            - ALL
+        volumeMounts:
+        - mountPath: /workspace
+          name: workspace
+        - mountPath: /run/satin
+          name: run
+          readOnly: true
+      restartPolicy: Never
+      runtimeClassName: gvisor
+      securityContext:
+        fsGroup: 1000
+        runAsGroup: 1000
+        runAsNonRoot: true
+        runAsUser: 1000
+        seccompProfile:
+          type: RuntimeDefault
+      serviceAccountName: satin-sandbox
+      terminationGracePeriodSeconds: 60
+      volumes:
+      - name: run
+        secret:
+          defaultMode: 292
+          secretName: satin-run-a274cb82f8-g1
+  volumeClaimTemplates:
+  - metadata:
+      name: workspace
+    spec:
+      accessModes:
+      - ReadWriteOnce
+      resources:
+        requests:
+          storage: 10Gi
+      storageClassName: standard-rwo

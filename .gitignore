@@ -1,0 +1,15 @@
+.env
+secrets/
+.satin-state.json
+*.tfstate
+*.tfstate.*
+.terraform/
+results/
+.venv/
+__pycache__/
+*.egg-info/
+.pytest_cache/
+.ruff_cache/
+*.tfplan
+.satin-state-verify.json
+.satin-state-verify-sonnet.json

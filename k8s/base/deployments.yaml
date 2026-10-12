@@ -1,0 +1,153 @@
+# Secrets (created by scripts/deploy-secrets.sh, never committed):
+#   satin-secrets: CLAUDE_API_KEY, SLACK_BOT_TOKEN, SLACK_APP_TOKEN, SATIN_HMAC_KEY,
+#                  CLAUDE_MANAGED_AGENT_ENVIRONMENT_ID, CLAUDE_MANAGED_AGENT_ENVIRONMENT_KEY
+#   satin-cc-environment-secret: environment-secret (Claude Code self-hosted environment)
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: satin-cma-orchestrator
+  namespace: satin-system
+spec:
+  replicas: 1
+  strategy:
+    type: Recreate
+  selector:
+    matchLabels: {app: satin-cma-orchestrator}
+  template:
+    metadata:
+      labels: {app: satin-cma-orchestrator}
+    spec:
+      serviceAccountName: satin-cma-orchestrator
+      terminationGracePeriodSeconds: 30
+      securityContext: {runAsNonRoot: true, runAsUser: 1000, seccompProfile: {type: RuntimeDefault}}
+      containers:
+        - name: orchestrator
+          image: satin-app
+          args: ["cma-orchestrator", "--config", "/etc/satin/satin.yaml"]
+          env:
+            - name: CLAUDE_MANAGED_AGENT_ENVIRONMENT_ID
+              valueFrom: {secretKeyRef: {name: satin-secrets, key: CLAUDE_MANAGED_AGENT_ENVIRONMENT_ID}}
+            - name: CLAUDE_MANAGED_AGENT_ENVIRONMENT_KEY
+              valueFrom: {secretKeyRef: {name: satin-secrets, key: CLAUDE_MANAGED_AGENT_ENVIRONMENT_KEY}}
+            - name: SATIN_HMAC_KEY
+              valueFrom: {secretKeyRef: {name: satin-secrets, key: SATIN_HMAC_KEY}}
+          volumeMounts:
+            - {name: config, mountPath: /etc/satin, readOnly: true}
+          securityContext: {allowPrivilegeEscalation: false, capabilities: {drop: [ALL]}}
+          resources:
+            requests: {cpu: 100m, memory: 256Mi}
+            limits: {memory: 512Mi}
+      volumes:
+        - name: config
+          configMap: {name: satin-config}
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: satin-cc-orchestrator
+  namespace: satin-system
+spec:
+  replicas: 1
+  strategy:
+    type: Recreate
+  selector:
+    matchLabels: {app: satin-cc-orchestrator}
+  template:
+    metadata:
+      labels: {app: satin-cc-orchestrator}
+    spec:
+      serviceAccountName: satin-cc-orchestrator
+      terminationGracePeriodSeconds: 30
+      securityContext: {runAsNonRoot: true, runAsUser: 1000, seccompProfile: {type: RuntimeDefault}}
+      containers:
+        - name: orchestrator
+          image: satin-app
+          command: ["claude"]
+          args:
+            - self-hosted-runner
+            - orchestrator
+            - --environment-secret-file
+            - /run/secrets/cc/environment-secret
+            - --hooks-dir
+            - /opt/satin/hooks
+            - --expected-spawn-seconds
+            - "180"
+            - --hook-timeout
+            - "55"
+            - --health-port
+            - "8080"
+          env:
+            - {name: SATIN_CONFIG, value: /etc/satin/satin.yaml}
+          ports: [{name: health, containerPort: 8080}]
+          volumeMounts:
+            - {name: config, mountPath: /etc/satin, readOnly: true}
+            - {name: cc-secret, mountPath: /run/secrets/cc, readOnly: true}
+          securityContext: {allowPrivilegeEscalation: false, capabilities: {drop: [ALL]}}
+          resources:
+            requests: {cpu: 100m, memory: 256Mi}
+            limits: {memory: 512Mi}
+        # Detects finished Sandbox Pods (idle release) and suspends them; expires old workspaces.
+        - name: reconcile
+          image: satin-app
+          args: ["cc", "reconcile", "--config", "/etc/satin/satin.yaml"]
+          volumeMounts:
+            - {name: config, mountPath: /etc/satin, readOnly: true}
+          securityContext: {allowPrivilegeEscalation: false, capabilities: {drop: [ALL]}}
+          resources:
+            requests: {cpu: 50m, memory: 128Mi}
+            limits: {memory: 256Mi}
+      volumes:
+        - name: config
+          configMap: {name: satin-config}
+        - name: cc-secret
+          secret: {secretName: satin-cc-environment-secret}
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: satin-slack-bot
+  namespace: satin-system
+spec:
+  replicas: 1
+  strategy:
+    type: Recreate
+  selector:
+    matchLabels: {app: satin-slack-bot}
+  template:
+    metadata:
+      labels: {app: satin-slack-bot}
+    spec:
+      serviceAccountName: satin-slack-bot
+      terminationGracePeriodSeconds: 30
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 1000
+        fsGroup: 1000
+        seccompProfile: {type: RuntimeDefault}
+      containers:
+        - name: bot
+          image: satin-app
+          args: ["slack", "--config", "/etc/satin/satin.yaml"]
+          env:
+            - name: CLAUDE_API_KEY
+              valueFrom: {secretKeyRef: {name: satin-secrets, key: CLAUDE_API_KEY}}
+            - name: SLACK_BOT_TOKEN
+              valueFrom: {secretKeyRef: {name: satin-secrets, key: SLACK_BOT_TOKEN}}
+            - name: SLACK_APP_TOKEN
+              valueFrom: {secretKeyRef: {name: satin-secrets, key: SLACK_APP_TOKEN}}
+            - name: SATIN_HMAC_KEY
+              valueFrom: {secretKeyRef: {name: satin-secrets, key: SATIN_HMAC_KEY}}
+            - name: CLAUDE_MANAGED_AGENT_ENVIRONMENT_ID
+              valueFrom: {secretKeyRef: {name: satin-secrets, key: CLAUDE_MANAGED_AGENT_ENVIRONMENT_ID}}
+          volumeMounts:
+            - {name: config, mountPath: /etc/satin, readOnly: true}
+            - {name: data, mountPath: /data}
+          securityContext: {allowPrivilegeEscalation: false, capabilities: {drop: [ALL]}}
+          resources:
+            requests: {cpu: 100m, memory: 256Mi}
+            limits: {memory: 512Mi}
+      volumes:
+        - name: config
+          configMap: {name: satin-config}
+        - name: data
+          persistentVolumeClaim: {claimName: satin-slack-bot-data}

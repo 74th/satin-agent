@@ -1,0 +1,12 @@
+assets:
+  state_file: .satin-state-verify.json
+  gcs_url: gs://nnyn-dev-satin-agent-assets/satin/default/
+agent:
+  name: satin-agent-verify
+  model: claude-haiku-5-5
+  bash_always_ask: false  # 検証用のagent: スクリプトが直接操作するので確認なし
+kubernetes:
+  context: gke_nnyn-dev_us-central1-a_silk-agent-gke
+  sandbox_namespace: satin-sandboxes
+gcp:
+  project: nnyn-dev
