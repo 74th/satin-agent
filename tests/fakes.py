@@ -139,8 +139,10 @@ class FakeKube:
             {"status": {"conditions": [{"type": "Ready", "status": "True", "reason": "Ready"}]}},
         )
 
-    async def pod_exit(self, name: str, code: int) -> None:
-        state = {"terminated": {"exitCode": code}}
+    async def pod_exit(self, name: str, code: int, message: str | None = None) -> None:
+        state: dict[str, Any] = {"terminated": {"exitCode": code}}
+        if message is not None:
+            state["terminated"]["message"] = message
         await self.patch(
             "pod",
             name,
@@ -416,6 +418,10 @@ class FakeSessions:
     async def list_events(self, session_id: str) -> list[dict[str, Any]]:
         return [dict(e) for e in self.events[session_id]]
 
+    async def last_event_id(self, session_id: str) -> str:
+        evs = self.events[session_id]
+        return evs[-1]["id"] if evs else ""
+
     async def status(self, session_id: str) -> dict[str, Any]:
         return {"status": "running" if self.running[session_id] else "idle", "stop_reason": None}
 
@@ -449,6 +455,27 @@ class FakeSessions:
             sid, "session.status_idle", stop_reason={"type": "requires_action", "event_ids": [tid]}
         )
         return tid
+
+    def custom_tool_use(self, sid: str, name: str, inp: dict) -> str:
+        """カスタムツール（Sandbox内のワーカーが実行する）。権限ポリシーは効かない。"""
+        tid = self._emit(sid, "agent.custom_tool_use", name=name, input=inp)
+        self.pending[sid].append(tid)
+        self._emit(
+            sid, "session.status_idle", stop_reason={"type": "requires_action", "event_ids": [tid]}
+        )
+        return tid
+
+    def custom_tool_result(self, sid: str, tid: str, text: str = "ok", error: bool = False) -> None:
+        if tid in self.pending[sid]:
+            self.pending[sid].remove(tid)
+        self._emit(
+            sid,
+            "user.custom_tool_result",
+            custom_tool_use_id=tid,
+            is_error=error,
+            content=[{"type": "text", "text": text}],
+        )
+        self._emit(sid, "session.status_running")
 
     def tool_result(self, sid: str, tid: str, error: bool = False) -> None:
         if tid in self.pending[sid]:

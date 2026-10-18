@@ -7,6 +7,7 @@ from pathlib import Path
 from typing import Any
 
 from ..ports import AnthropicPort
+from ..runtime.bgtasks import TOOL_DEFS
 from .load import Assets
 
 SKILLS_NOTICE = (
@@ -16,12 +17,25 @@ SKILLS_NOTICE = (
     "関係するSkillの SKILL.md を読んでから進めてください。"
 )
 
+BACKGROUND_NOTICE = (
+    "## コマンドの実行とバックグラウンドのタスク\n"
+    "`cd`・`export`などシェルの状態を変える操作以外のコマンドは、`bash`ではなく`run`で実行してください。"
+    "`run`は、待ち時間（既定30秒、最大60秒）以内に終われば結果を返し、終わらなければ止めずに"
+    "バックグラウンドへ回してタスクIDを返します。"
+    "タスクは`task_status`で確認、`task_wait`で待機（1回60秒まで）、`task_stop`で停止できます。"
+    "結果をすぐに必要としないときは、`task_wait`を繰り返さずに、いったんturnを終えてください。"
+    "バックグラウンドのタスクが終わると、あなたに知らせが届きます"
+    "（ツール結果の末尾の`[satin]`の行、または`[自動通知]`のメッセージ）。"
+    "知らせを受けたら`task_status`で結果を確認し、依頼に沿ってユーザへ報告してください。"
+)
+
 
 def build_system(assets: Assets) -> str:
     parts = []
     if assets.claude_md:
         parts.append(assets.claude_md.rstrip())
     parts.append(SKILLS_NOTICE)
+    parts.append(BACKGROUND_NOTICE)
     return "\n\n".join(parts) + "\n"
 
 
@@ -56,6 +70,9 @@ def agent_config(
     if bash_always_ask:
         toolset["configs"].append({"name": "bash", "permission_policy": {"type": "always_ask"}})
     tools: list[dict[str, Any]] = [toolset]
+    # ワーカーがSandbox内で実行するカスタムツール（権限ポリシーは効かない）。
+    # 名前・説明・入力の形は、ワーカーと同じ定義（runtime/bgtasks.TOOL_DEFS）から作る。
+    tools.extend({"type": "custom", **d} for d in TOOL_DEFS)
     for server in mcp_servers:
         # always_allow: Botはbash以外のツール確認に応答しない
         tools.append(

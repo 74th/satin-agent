@@ -176,4 +176,35 @@ def test_no_mcp_servers_leaves_tools_unchanged(tmp_path):
     a = publish_cma(load_assets(root), api, state)
     cfg = api.agents[a["id"]]["config"]
     assert "mcp_servers" not in cfg
-    assert [t["type"] for t in cfg["tools"]] == ["agent_toolset_20260401"]
+    assert [t["type"] for t in cfg["tools"] if t["type"] != "custom"] == ["agent_toolset_20260401"]
+
+
+def test_background_tools_are_declared_and_match_the_worker(tmp_path):
+    from anthropic.lib.tools.agent_toolset import AgentToolContext
+
+    from satin_agent.runtime import bgtools, idle
+
+    api, state = FakeAnthropic(), State(tmp_path / "s.json")
+    a = publish_cma(load_assets(make_assets(tmp_path / "a")), api, state)
+    cfg = api.agents[a["id"]]["config"]
+    declared = {t["name"]: t for t in cfg["tools"] if t["type"] == "custom"}
+    assert set(declared) == {"run", "task_status", "task_wait", "task_stop"}
+    assert "run" in cfg["system"] and "task_wait" in cfg["system"] and "[satin]" in cfg["system"]
+
+    idle.reset()
+    try:
+        worker = {
+            t.name: t
+            for t in bgtools.worker_tools(AgentToolContext(workdir=str(tmp_path)), {})
+            if t.name in declared
+        }
+        assert set(worker) == set(declared)
+        for name, t in worker.items():
+            d = t.to_dict()
+            assert (d["name"], d["description"], d["input_schema"]) == (
+                name,
+                declared[name]["description"],
+                declared[name]["input_schema"],
+            )
+    finally:
+        bgtools.reset()

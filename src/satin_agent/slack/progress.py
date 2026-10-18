@@ -14,7 +14,14 @@ def load_timezone(name: str | None) -> tzinfo:
     return ZoneInfo(name or DEFAULT_TIMEZONE)
 
 
-TOOL_MARK = {"running": "⏳", "success": "✅", "failure": "❌", "denied": "🚫", "interrupted": "⏹"}
+TOOL_MARK = {
+    "running": "⏳",
+    "success": "✅",
+    "failure": "❌",
+    "denied": "🚫",
+    "interrupted": "⏹",
+    "background": "🔄",
+}
 STATUS_TEXT = {
     "preparing_sandbox": "作業環境を起動中",
     "thinking": "考え中",
@@ -32,7 +39,7 @@ class ToolView:
     tool_use_id: str
     name: str
     summary: str
-    status: str = "running"  # running | success | failure | denied | interrupted
+    status: str = "running"  # running | success | failure | denied | interrupted | background
 
 
 @dataclass
@@ -51,7 +58,10 @@ class ProgressView:
         if len(self.tools) > len(shown):
             lines.append(f"（先頭の{len(self.tools) - len(shown)}件を省略）")
         for t in shown:
-            lines.append(f"{TOOL_MARK.get(t.status, '•')} `{t.name}` {t.summary}".rstrip())
+            line = f"{TOOL_MARK.get(t.status, '•')} `{t.name}` {t.summary}"
+            if t.status == "background":
+                line += "（バックグラウンドで実行中）"
+            lines.append(line.rstrip())
         if self.appended:
             lines.append(f"追加の指示: {self.appended}件")
         if self.note:

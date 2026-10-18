@@ -54,6 +54,7 @@ def test_recorder_redacts_secrets_and_records_evidence(tmp_path, monkeypatch):
 def test_all_scenarios_registered():
     assert {
         "tool_in_sandbox",
+        "custom_tool_in_sandbox",
         "skills",
         "mcp",
         "secrets_hidden",
@@ -67,4 +68,10 @@ def test_all_scenarios_registered():
         "long_tool_default_timeout",
         "long_tool_explicit_timeout",
         "long_tool_25min",
+        "bg_run_survives_turn",
+        "bg_notice_in_turn",
+        "bg_task_stop",
+        "bg_max_seconds",
+        "bg_lost_on_pod_delete",
+        "bg_leftover_children",
     } == set(SCENARIOS)

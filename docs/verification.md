@@ -220,3 +220,94 @@ uv run python -m verification.make_report
 | 切り替え（イメージのpush → `satin publish --target gcs` → `scripts/deploy.sh` → `satin sandbox gc --all`） | 実施。`gs://nnyn-dev-satin-agent-assets/satin/default/`には`assets.zip`だけが残った（従来のファイルと`manifest.json`は削除された）。古いSandbox 3件を削除 |
 | (A) Sandbox内のツール実行・Skillの利用（`results/zip-bundle-20261012-174221.json`） | 合格。新しいイメージのSandboxが`assets.zip`を取得・展開して起動し、`container-probe`のSkillで識別子`satin-runtime-zip1`を答えた |
 | (B) SkillsとCLAUDE.mdの読み込み | 合格。claude.aiのself-hosted Environmentで始めたセッションで、`container-probe`のSkillにより識別子`satin-runtime-zip1`が返った。Sandbox（モード`cc`）では、`assets.zip`の展開結果が`/workspace/.satin/assets`に、SkillsとCLAUDE.mdがホスト設定ディレクトリ（`~/.claude-host`）に置かれ、CLAUDE.mdの内容（日本語・絵文字なし）も反映されていた |
+
+## バックグラウンド実行（add-cma-background-tasks）
+
+実施日: 2026-10-14。クラスタ: `gke_nnyn-dev_us-central1-a_silk-agent-gke`（検証のために作り直したもの。terraformを適用し、ランタイムイメージ`satin-runtime-bg1`・アプリのイメージ`satin-app:bg1`を入れ、Agentに`run`・`task_*`を足した）。配備の順序はdesign.mdのMigration Planどおり（イメージ → `scripts/deploy.sh` → `satin publish --target cma`）。
+
+### スパイク（タスク1.1・1.2）
+
+| 項目 | 結果 |
+| --- | --- |
+| 宣言した`custom`ツールを、ワーカーが実行して結果を返せる | 確認。work secretの権限で`user.custom_tool_result`が返る（`custom_tool_use_id`で元の呼び出しを指す。Botはこのフィールドも読む） |
+| `run`の実行中の`user.message` | 400（`waiting on responses to events`）。`run`が返った後は受け付けられる |
+| `_IdleClock.hold()`の間、runnerは残るか | 残った。turn終了から25秒後（`max_idle`は10秒）も生きており、その間の`user.message`を同じrunnerが処理した。タスクが終わった約10秒後に`handle_item()`が返った |
+| 終了メッセージ（`/dev/termination-log`） | Sandboxの停止後、オーケストレータの`exit_info()`が`containerStatuses[].state.terminated.message`として読めた。ConfigMapの`finished_tasks`に、タスクのID・状態・終了コードが公開された（下の`bg_run_survives_turn`） |
+
+### 自動シナリオ（Managed Agentsのセッションを直接操作。`verification/run_cma.py`）
+
+結果: `results/cma-bg-20261014-102033.json`・`cma-bg2-20261014-102531.json`・`cma-bg3-20261014-103006.json`
+
+| シナリオ | 結果 | 観察した振る舞い |
+| --- | --- | --- |
+| `custom_tool_in_sandbox` | 合格 | `run`で`cat /etc/satin-image-id`を実行し、識別子`satin-runtime-bg1`が返った |
+| `bg_run_survives_turn` | 合格 | `sleep 70`を待ち時間10秒で実行。約10秒でバックグラウンドへ回り、turnは34秒で終了。turnの後もSandboxはRunningのまま、タスクの終了後に停止。終了メッセージの報告（ConfigMapの`finished_tasks`: 状態`exited`・終了コード0）を確認。再開後の`task_status`で`終了（終了コード 0）` |
+| `bg_notice_in_turn` | 合格 | turnの途中で終わったタスクの知らせが、次のツール結果の末尾に付いた（1回だけ） |
+| `bg_task_stop` | 合格 | `task_stop`で、`sh -c 'sleep 600 & sleep 600'`の2つの`sleep`が両方止まり（残り0）、状態は停止 |
+| `bg_max_seconds` | 合格 | 上限時間を30秒にして`sleep 120`を実行すると、`task_wait`の結果が上限超過 |
+| `bg_lost_on_pod_delete` | 合格 | タスクの実行中にPodを削除。SIGTERMでタスクが止められて消失として記録され、次の依頼の`task_status`が消失を返した |
+| 既存: `tool_in_sandbox`・`skills`・`secrets_hidden`・`resume_workspace`・`kill_pod_during_tool` | 合格 | 変更の影響なし（`kill_pod_during_tool`はPod削除後に回復して完了） |
+
+最初の実行で`bg_run_survives_turn`が一度、120秒の待ちで失敗した。作り直した直後のクラスタで、最初のSandboxの起動（イメージの取得）に時間がかかったため。待ちを240秒にして再実行し、合格した。
+
+### Botの中核（Slackなし、実環境。`verification/run_bot.py`）
+
+結果: `results/bot-20261014-103409.json`
+
+| シナリオ | 結果 | 観察した振る舞い |
+| --- | --- | --- |
+| `bg_append_no_interrupt` | 合格 | `run`の実行中の追加指示を、`user.interrupt`なし・中断の表示なしで結果の後に処理し、`date`の結果を報告した（Jev noul=0.75）。進捗に「追加の指示: 1件」 |
+| `bg_notice_after_turn` | 合格 | turnを終えた後も監視を続け、タスクの終了後にBotが`[自動通知]`をセッションへ1件だけ送り、エージェントが結果（`bg-ok`）を報告した。30秒待っても2件目は来ない |
+
+### コードレビュー（xprivate/codex-review.md）の指摘への対応
+
+実施日: 2026-10-14。ランタイムイメージ・Botを`bg2`に入れ替えて、同じシナリオを再実行した（`results/cma-bg4-20261014-114650.json`、`results/bot-20261014-115031.json`。すべて合格）。
+
+| 指摘 | 対応 | 確認 |
+| --- | --- | --- |
+| 1 [P1] 別のturnの実行中に終わったタスクの通知が失われる | turnの実行中も報告を読み、追加の指示として送る。監視の`since`はturnをまたいで動かさない。さらに、Botが読む前に次のturnの状態（starting・running）で報告が上書きされて消える競合があったため、オーケストレータは前の未読の報告を次の状態に引き継ぐ（上限20件。通知済みはBotがSQLiteで判定） | ユニットテスト（turn中の報告、上書き後の報告、通知の1回だけ） |
+| 2 [P2] 通知の送信に失敗しても通知済みのまま再送されない | 通知の本文（未送信）・通知済み・監視の更新を1つのトランザクションで保存し、送信できたら消す。新しいturnが最初の指示を送れずに失敗したら、次のpollで同じ通知を再送する。Botの再起動後も、未送信の通知を送る | ユニットテスト（通信エラー後の再送、送信前の再起動） |
+| 3 [P2] シェルが先に終わると残った子プロセスを止められない | シェルの終了時に、同じプロセスグループの残りを止めてからタスクを確定する（ゾンビは数えない）。結果にその旨を書く。`cmd &`で子を残す使い方はできなくなる | ユニットテスト、`bg_leftover_children`（実クラスタ。残りのプロセス0、結果に注記） |
+| 4 [P2] タスクの停止時間が終了猶予に含まれない | タスクの停止を並列にし、停止とhandlerの待機を同じ期限（`grace`）に収める | ユニットテスト（SIGTERMを無視する3件の停止が足し算にならない、停止が長くても`grace`で終了） |
+
+### 再レビューの指摘への対応
+
+実施日: 2026-10-14。Botを`bg3`に入れ替え、Botの中核のシナリオ（`bg_append_no_interrupt`・`bg_notice_after_turn`・`append_interrupt`・`stop_word`・`bot_kill_pod_during_tool`）を再実行して、すべて合格した（`results/bot-20261014-135546.json`）。
+
+| 指摘 | 対応 | 確認 |
+| --- | --- | --- |
+| 1 [P2] 通知用turnの保存直後に再起動すると、未送信通知が削除される | 通知は、セッションに届いた証拠（`user.message`のイベント）を見るまで保留に残す。送る役のturnが実行中の間はそのturnに任せ、送れずに終わったら再送する。あわせて、復帰時に最初の指示を送った記録がなければ、同じセッションの過去のturnのイベントをこのturnのものとして処理せず（過去の返答の再投稿・即完了を防ぐ）、保存した最初の指示を再送する | ユニットテスト（保存後・送信前に落ちて復帰、返答の再投稿なし、通知は1件） |
+| 2 [P2] ツール結果待ちの通知が、実際の送信前に保留から消える | 保留は、`user.message`のイベントを見るまで消さない。`run`の結果待ちでbufferに入れた通知の送信に失敗してturnが失敗しても、次のpollで再送する | ユニットテスト（flushの失敗後に再送、保留は届いた後に消える） |
+
+保留の削除は「少なくとも1回」の送信。送信の成功とイベントの処理の間にturnが失敗すると、まれに二重に送られる。
+
+### 再レビュー（bg3）の指摘への対応
+
+実施日: 2026-10-14。Botを`bg4`に入れ替え、Botの中核のシナリオ4件を再実行して合格した（`results/bot-20261014-162958.json`。`events.list(limit=1, order="desc")`による境界の取得も、実環境で動作を確認）。
+
+| 指摘 | 対応 | 確認 |
+| --- | --- | --- |
+| [P2] 過去と同じ文面の依頼を、今回の送信済みイベントと誤認する | 最初の指示を送る直前に、セッションの最後のイベントIDを境界として永続化する（`SessionsPort.last_event_id`）。復帰時は、境界より後のイベントだけから最初の指示を探す。境界を記録する前に落ちた（まだ何も送っていない）場合は、再送する | ユニットテスト（同じ文面を送る前に落ちて復帰: 再送され、過去の返答は再投稿されない。送信後に落ちて復帰: 二重に送らない） |
+
+### 再レビュー（bg4）の指摘への対応
+
+実施日: 2026-10-14。Botを`bg5`に入れ替え、Botの中核のシナリオ5件を再実行して合格した（`results/`の最新の`bot-*.json`）。
+
+| 指摘 | 対応 | 確認 |
+| --- | --- | --- |
+| 1 [P2] 復帰時の再送前に境界を保存せず、次の再起動で二重送信する | 最初の指示の送信（初回も復帰時の再送も）を1つの手順（`_send_first`）にまとめ、指示・送信件数・境界を永続化してから送る。復帰時に履歴をseenにするだけで`last_event_id`を書き換える処理は削除した | ユニットテスト（再送が届いた後、イベント処理前に再び落ちても、3回目は送らない） |
+| 2 [P2] 復帰時の再送が`sent`に数えられず、追加指示の返答を取りこぼす | 最初の指示は1回だけ`sent`に数える（`first_counted`。このフィールドがない古い記録は、`sent`が1以上なら数え済みとして扱う） | ユニットテスト（復帰して再送した後の追加指示の返答も投稿される） |
+
+### Slackでの手動確認（タスク7.3）
+
+`verification/manual_scenarios.md`の「バックグラウンド実行」の手順。
+
+実施日: 2026-10-18。クラスタ: `gke_nnyn-dev_us-central1-a_silk-agent-gke`。ランタイム・アプリのイメージ`bg2`（再レビューの2件の対応を含む）、Agentはversion 5。配備の順序はMigration Planどおり。
+
+| # | 操作 | 結果 |
+| --- | --- | --- |
+| 1 | `sleep 120`を実行させ、実行中に「現在時刻を教えて」と追加指示 | 合格。`sleep 120`は中断されず、進捗に「追加の指示: 1件」。追加指示は`run date`として処理され、完了後に`sleep 120`が終了コード0で終わったと返答 |
+| 2 | `sleep 90`をバックグラウンドで開始させ、待たずにturnを終える | 合格。Botのログに`bg_notice`（タスク`t-3-91ab`）が出て、新しいturnが始まり、約90秒後にスレッドへ「終了コード0、経過1分30秒」と報告された。同じ内容の報告は1回だけ |
+| 3 | 再起動をまたぐ通知（`manual_scenarios.md` 10.5b-3） | 未実施 |
+
+1のturnは、エージェントが同じturnで`task_wait`を使って最後まで待ったため、自動通知の経路を通っていない。自動通知は2で確認した。

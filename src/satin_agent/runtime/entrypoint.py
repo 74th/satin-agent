@@ -11,6 +11,8 @@
   SATIN_STARTUP_CONTINUE_ON_FAILURE  1ならstartup.shが失敗してもワーカーを起動
   SATIN_CMA_MAX_IDLE    (A) idle後の待機秒（既定10）
   SATIN_BASH_DEFAULT_TIMEOUT / SATIN_BASH_MAX_TIMEOUT  bashの既定・上限の秒（既定3600 / 7200）
+  SATIN_BG_MAX_TASKS / SATIN_BG_MAX_SECONDS / SATIN_BG_DEFAULT_WAIT
+                        バックグラウンドのタスクの同時数・上限秒・既定の待ち秒（既定4 / 7200 / 30）
   SATIN_CC_RELEASE_IDLE_MIN / SATIN_CC_DRAIN_WAIT_SEC / SATIN_HOST_CONFIG_DIR  (B)
 """
 
@@ -23,6 +25,7 @@ from collections.abc import Callable, Mapping
 from pathlib import Path
 
 from ..ports import ObjectStore
+from . import idle
 from .assets import AssetBundleError, fetch_assets, place_for_claude_code
 from .modes import (
     MODES,
@@ -102,6 +105,7 @@ async def run(
     if mode == "cma":
         assert cma_work is not None
         apply_cma_timeouts(env)  # 1回のツール呼び出しの上限（SDKの既定は150秒）を上書きする
+        idle.install()  # バックグラウンドのタスクの間、アイドルでの終了を止める
         return await run_cma(
             cma_work,
             workdir=str(workspace),

@@ -310,3 +310,87 @@ async def test_rerun_worker_that_left_the_lease_alone_is_reported_as_failed():
     assert st is not None and st["state"] == "failed" and "完了できません" in st["error"]
     assert env.src.stopped == ["w1"]  # 落ちたワーカーのリースを解放する
     await env.finish()
+
+
+async def _run_and_exit(env, message):
+    await env.users.register("S1", "me@example.com")
+    env.start()
+    await env.src.q.put(item("S1"))
+    name = sandbox_name("S1", 1)
+    await env.until(lambda: ("sandbox", name) in env.kube.objects)
+    await env.kube.pod_ready(name)
+    await env.kube.pod_exit(name, 0, message)
+    await env.until(
+        lambda: env.kube.objects[("sandbox", name)]["spec"]["operatingMode"] == "Suspended"
+    )
+
+    async def stopped():
+        st = await env.states.get("S1")
+        return st is not None and st["state"] == "stopped"
+
+    await env.until(stopped)
+    return await env.states.get("S1")
+
+
+async def test_finished_tasks_from_the_termination_message_are_published():
+    env = Env()
+    msg = (
+        '{"finished_tasks": [{"id": "t-1-ab12", "command": "sleep 60", "state": "exited",'
+        ' "exit_code": 0, "secret": "WORKSECRET"}]}'
+    )
+    st = await _run_and_exit(env, msg)
+    assert st["finished_tasks"] == [
+        {"id": "t-1-ab12", "command": "sleep 60", "state": "exited", "exit_code": 0}
+    ]
+    assert "WORKSECRET" not in str(st)  # 決まった項目だけを公開する
+    await env.finish()
+
+
+async def test_finished_count_only_report_is_published():
+    env = Env()
+    st = await _run_and_exit(env, '{"finished_count": 9}')
+    assert st["finished_count"] == 9 and "finished_tasks" not in st
+    await env.finish()
+
+
+async def test_broken_termination_message_still_publishes_state():
+    env = Env()
+    st = await _run_and_exit(env, "{not json")
+    assert st["state"] == "stopped" and "finished_tasks" not in st
+    await env.finish()
+
+
+async def test_no_termination_message_publishes_no_tasks():
+    env = Env()
+    st = await _run_and_exit(env, None)
+    assert st["state"] == "stopped" and "finished_tasks" not in st
+    await env.finish()
+
+
+async def test_unread_report_is_carried_into_the_next_state_and_capped():
+    env = Env()
+    pub = env.states
+    a = {"id": "t-1-aa", "command": "x", "state": "exited", "exit_code": 0}
+    await pub.set("S1", "stopped", None, [a], 0)
+    await pub.set("S1", "starting")  # 次のturn。Botがまだ読んでいない
+    await pub.set("S1", "running")
+    st = await pub.get("S1")
+    assert st["state"] == "running" and st["finished_tasks"] == [a]
+    b = {"id": "t-2-bb", "command": "y", "state": "exited", "exit_code": 1}
+    await pub.set("S1", "stopped", None, [b, a], 0)
+    assert [t["id"] for t in (await pub.get("S1"))["finished_tasks"]] == ["t-2-bb", "t-1-aa"]
+    many = [
+        {"id": f"t-{i}-cc", "command": "", "state": "exited", "exit_code": 0} for i in range(30)
+    ]
+    await pub.set("S1", "stopped", None, many, 0)
+    assert len((await pub.get("S1"))["finished_tasks"]) == 20
+
+
+async def test_count_only_report_is_carried_with_its_publication_time():
+    env = Env()
+    await env.states.set("S1", "stopped", None, None, 7)
+    at = (await env.states.get("S1"))["finished_count_at"]
+    env.clock.advance(10) if not asyncio.iscoroutinefunction(env.clock.advance) else None
+    await env.states.set("S1", "running")
+    st = await env.states.get("S1")
+    assert st["finished_count"] == 7 and st["finished_count_at"] == at

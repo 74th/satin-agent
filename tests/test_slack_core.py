@@ -576,3 +576,604 @@ def test_invalid_timezone_is_a_config_error():
             users=type("U", (), {"info": lambda s, u: None})(),
             bot_user_id="U",
         )
+
+
+# --- バックグラウンド実行（run・task_*） ---
+BG_RESULT = (
+    "[satin] バックグラウンドで実行中: t-1-ab12（30秒以内に終わらなかったため、"
+    "止めずにバックグラウンドへ回しました）\n出力: /workspace/.satin/tasks/t-1-ab12/output.log"
+)
+
+
+async def test_additional_instruction_during_run_waits_without_interrupt():
+    env = Env()
+    sid = await started(env)
+    tid = env.sessions.custom_tool_use(sid, "run", {"command": "sleep 20"})
+    await env.settle()
+    await env.core.handle(msg("終わったらdateも実行して"))
+    await env.settle()
+    assert env.sessions.interrupts == []  # runは最長60秒で返るので、中断しない
+    assert env.sessions.sent == [(sid, "依頼")]  # 結果が返るまで送らない
+    assert "追加の指示: 1件" in env.channel.last_progress()
+    env.sessions.custom_tool_result(sid, tid, "20秒たちました\n")
+    await env.settle()
+    assert (sid, "終わったらdateも実行して") in env.sessions.sent  # 結果の後に送る
+    assert env.sessions.interrupts == []
+    env.sessions.end_turn(sid)
+    await env.settle()
+    env.sessions.end_turn(sid)
+    await env.core.wait_idle()
+
+
+@pytest.mark.parametrize("name", ["task_status", "task_wait", "task_stop"])
+async def test_additional_instruction_during_task_tools_waits_without_interrupt(name):
+    env = Env()
+    sid = await started(env)
+    env.sessions.custom_tool_use(sid, name, {"task_id": "t-1-ab12"})
+    await env.settle()
+    await env.core.handle(msg("追加"))
+    await env.settle()
+    assert env.sessions.interrupts == []
+    env.sessions.end_turn(sid)
+
+
+async def test_builtin_bash_next_to_run_still_interrupts():
+    env = Env()
+    sid = await started(env)
+    env.sessions.custom_tool_use(sid, "run", {"command": "sleep 20"})
+    env.sessions.tool_use(sid, "bash", {"command": "sleep 30"})
+    await env.settle()
+    await env.core.handle(msg("追加"))
+    await env.settle()
+    assert env.sessions.interrupts == [sid]  # 組み込みのbashが含まれるときは、今どおり中断する
+    env.sessions.end_turn(sid)
+
+
+async def test_other_custom_tool_with_same_name_as_bg_tool_is_not_special():
+    """MCPなどのツールは、名前が`run`でも中断する（`agent.custom_tool_use`だけが対象）。"""
+    env = Env()
+    sid = await started(env)
+    env.sessions.tool_use(sid, "run", {"command": "x"})
+    await env.settle()
+    await env.core.handle(msg("追加"))
+    await env.settle()
+    assert env.sessions.interrupts == [sid]
+    env.sessions.end_turn(sid)
+
+
+async def finish_with_background_task(env, sid):
+    tid = env.sessions.custom_tool_use(sid, "run", {"command": "sleep 120"})
+    await env.settle()
+    env.sessions.custom_tool_result(sid, tid, BG_RESULT)
+    await env.settle()
+    return tid
+
+
+async def test_progress_shows_background_task_and_remaining_count_when_turn_finishes():
+    env = Env()
+    sid = await started(env)
+    await finish_with_background_task(env, sid)
+    prog = env.channel.last_progress()
+    assert "🔄" in prog and "バックグラウンドで実行中）" in prog
+    assert "バックグラウンドで実行中のタスク: 1件" in prog
+    env.sessions.say(sid, "バックグラウンドで実行しています")
+    env.sessions.end_turn(sid)
+    await env.core.wait_idle()
+    prog = env.channel.last_progress()
+    assert prog.startswith("*完了*") and "バックグラウンドで実行中のタスク: 1件" in prog
+    watch = env.store.get_watch(CONV.key)
+    assert watch and watch["tasks"] == ["t-1-ab12"]
+
+
+async def test_finished_task_seen_in_a_result_is_not_counted_as_remaining():
+    env = Env()
+    sid = await started(env)
+    await finish_with_background_task(env, sid)
+    tid = env.sessions.custom_tool_use(sid, "task_status", {"task_id": "t-1-ab12"})
+    await env.settle()
+    env.sessions.custom_tool_result(
+        sid, tid, "t-1-ab12: 終了（終了コード 0） 経過 2分0秒 `sleep 120`"
+    )
+    await env.settle()
+    env.sessions.end_turn(sid)
+    await env.core.wait_idle()
+    assert "バックグラウンド" not in env.channel.last_progress().split("\n", 1)[1].replace(
+        "（バックグラウンドで実行中）", ""
+    )
+    assert env.store.get_watch(CONV.key) is None
+
+
+def status_box(box):
+    async def sandbox_state(sid):
+        return box.get("v")
+
+    return sandbox_state
+
+
+def stopped_with(env, *tasks, at=None, count=0):
+    from satin_agent.slack.core import SandboxStatus
+
+    return SandboxStatus(
+        "stopped",
+        env.clock.now() if at is None else at,
+        "",
+        tuple(tasks),
+        count,
+    )
+
+
+DONE = {"id": "t-1-ab12", "command": "sleep 120", "state": "exited", "exit_code": 0}
+
+
+async def end_turn_with_task(env, sid):
+    await finish_with_background_task(env, sid)
+    env.sessions.end_turn(sid)
+    await env.core.wait_idle()
+
+
+async def test_finished_task_is_announced_once_and_starts_a_new_turn():
+    box = {}
+    env = Env(sandbox_state=status_box(box))
+    sid = await started(env)
+    await end_turn_with_task(env, sid)
+    assert await env.core.poll_background() == 0  # まだ動いている（または、通知がない）
+    await env.clock.advance(5)
+    box["v"] = stopped_with(env, DONE)
+    assert await env.core.poll_background() == 1
+    await env.settle()
+    [(_, text)] = env.sessions.sent[1:]
+    assert text.startswith("[自動通知]") and "t-1-ab12" in text and "終了コード 0" in text
+    assert "task_status" in text
+    assert env.store.is_notified(sid, "t-1-ab12") and env.store.get_watch(CONV.key) is None
+    assert env.core.runners[CONV.key].rec.session_id == sid  # 新しいturnが始まった
+    assert any(h[0] == "bg_notice" for h in env.hooks)  # 監査フックに渡す
+    # 同じ状態を何度読んでも、2回は送らない
+    assert await env.core.poll_background() == 0
+    assert len(env.sessions.sent) == 2
+    env.sessions.end_turn(sid)
+    await env.core.wait_idle()
+
+
+async def test_announcement_is_not_sent_twice_after_bot_restart():
+    box = {}
+    store = BotStore()
+    env = Env(sandbox_state=status_box(box), store=store)
+    sid = await started(env)
+    await end_turn_with_task(env, sid)
+    await env.clock.advance(5)
+    box["v"] = stopped_with(env, DONE)
+    assert await env.core.poll_background() == 1
+    await env.settle()
+    env.sessions.end_turn(sid)
+    await env.core.wait_idle()
+    # 再起動した（SQLiteは残る）が、同じConfigMapの内容が残っている。記録が落ちる前の状態を再現する
+    store.set_watch(CONV.key, sid, env.clock.now() - 10, ["t-1-ab12"])
+    env2 = Env(sandbox_state=status_box(box), store=store)
+    env2.sessions = env.sessions
+    env2.core.sessions = env.sessions
+    before = len(env.sessions.sent)
+    assert await env2.core.poll_background() == 0
+    assert len(env.sessions.sent) == before and store.get_watch(CONV.key) is None
+
+
+async def test_already_notified_report_still_in_the_state_is_ignored():
+    box = {}
+    env = Env(sandbox_state=status_box(box))
+    sid = await started(env)
+    env.store.mark_notified(sid, ["t-1-ab12"])  # 前のturnで知らせ済み（状態には残っている）
+    box["v"] = stopped_with(env, DONE, at=env.clock.now() - 100)
+    await end_turn_with_task(env, sid)
+    assert await env.core.poll_background() == 0
+    assert len(env.sessions.sent) == 1
+
+
+async def test_report_published_during_another_turn_is_delivered_as_additional_instruction():
+    """別のturnの実行中に終わったタスクの報告も、読んで追加の指示として送る（通知を失わない）。"""
+    box = {}
+    env = Env(sandbox_state=status_box(box))
+    sid = await started(env)
+    await end_turn_with_task(env, sid)
+    await env.core.handle(msg("別の依頼"))
+    await env.settle()
+    assert not env.core.runners[CONV.key].done.is_set()
+    await env.clock.advance(5)
+    box["v"] = stopped_with(env, DONE)
+    assert await env.core.poll_background() == 1
+    await env.settle()
+    assert env.sessions.sent[-1][1].startswith("[自動通知]")
+    assert env.sessions.interrupts == []
+    env.sessions.end_turn(sid)  # 別の依頼のturnを、ツールを使わずに終える
+    env.sessions.end_turn(sid)  # 追加の指示のturn
+    await env.core.wait_idle()
+    assert await env.core.poll_background() == 0
+    assert len([t for _, t in env.sessions.sent if t.startswith("[自動通知]")]) == 1
+    assert env.store.list_pending() == []
+
+
+async def test_report_overwritten_by_the_next_state_is_still_found():
+    """Botが読む前に、次のturnの状態（running）で上書きされても、報告は引き継がれて残る。"""
+    from satin_agent.slack.core import SandboxStatus
+
+    box = {}
+    env = Env(sandbox_state=status_box(box))
+    sid = await started(env)
+    await end_turn_with_task(env, sid)
+    box["v"] = SandboxStatus("running", env.clock.now() + 1, "", (DONE,), 0)  # 引き継がれた報告
+    assert await env.core.poll_background() == 1
+    await env.settle()
+    assert "t-1-ab12" in env.sessions.sent[-1][1]
+    env.sessions.end_turn(sid)
+    await env.core.wait_idle()
+
+
+async def test_failed_announcement_is_retried_after_the_connection_recovers():
+    box = {}
+    env = Env(sandbox_state=status_box(box))
+    sid = await started(env)
+    await end_turn_with_task(env, sid)
+    await env.clock.advance(5)
+    box["v"] = stopped_with(env, DONE)
+    real = env.sessions.send_message
+    broken = {"v": True}
+
+    async def flaky(session_id, text):
+        if broken["v"] and text.startswith("[自動通知]"):
+            raise ConnectionError("down")
+        await real(session_id, text)
+
+    env.sessions.send_message = flaky
+    assert await env.core.poll_background() == 1  # 通知用のturnを始めたが、送信に失敗する
+    await env.core.wait_idle()
+    assert [t for _, t in env.sessions.sent if t.startswith("[自動通知]")] == []
+    assert len(env.store.list_pending()) == 1  # 送れていない通知が残る
+    broken["v"] = False
+    assert await env.core.poll_background() == 1  # 復旧後に、同じ通知を再送する
+    await env.settle()
+    assert len([t for _, t in env.sessions.sent if t.startswith("[自動通知]")]) == 1
+    env.sessions.end_turn(sid)
+    await env.core.wait_idle()
+    assert await env.core.poll_background() == 0
+    assert env.store.list_pending() == []
+
+
+async def test_notice_is_not_lost_when_the_bot_restarts_before_sending():
+    box = {}
+    store = BotStore()
+    env = Env(sandbox_state=status_box(box), store=store)
+    sid = await started(env)
+    await end_turn_with_task(env, sid)
+    box["v"] = stopped_with(env, DONE)
+    [w] = store.list_watches()
+    assert await env.core._detect_finished(w)  # 永続化まで進んで、送る前に落ちた
+    assert store.is_notified(sid, "t-1-ab12") and len(store.list_pending()) == 1
+    env2 = Env(sandbox_state=status_box(box), store=store)
+    env2.sessions, env2.core.sessions = env.sessions, env.sessions
+    assert await env2.core.poll_background() == 1
+    await env2.settle()
+    assert len([t for _, t in env.sessions.sent if t.startswith("[自動通知]")]) == 1
+    env2.sessions.end_turn(sid)
+    await env2.core.wait_idle()
+
+
+async def test_watch_start_time_is_kept_across_turns():
+    env = Env()
+    env.core.sync_bg_watch(CONV.key, "S", ["t-1-a"])
+    first = env.store.get_watch(CONV.key)["since"]
+    await env.clock.advance(50)
+    env.core.sync_bg_watch(CONV.key, "S", ["t-1-a"])
+    assert env.store.get_watch(CONV.key)["since"] == first
+
+
+async def test_count_only_report_is_announced_once():
+    box = {}
+    env = Env(sandbox_state=status_box(box))
+    sid = await started(env)
+    await end_turn_with_task(env, sid)
+    await env.clock.advance(5)
+    box["v"] = stopped_with(env, count=7)
+    assert await env.core.poll_background() == 1
+    await env.settle()
+    assert "7件" in env.sessions.sent[-1][1]
+    env.sessions.end_turn(sid)
+    await env.core.wait_idle()
+
+
+async def test_stopped_without_report_drops_the_watch():
+    box = {}
+    env = Env(sandbox_state=status_box(box))
+    sid = await started(env)
+    await end_turn_with_task(env, sid)
+    await env.clock.advance(5)
+    box["v"] = stopped_with(env)  # 全部、伝え済み・消失
+    assert await env.core.poll_background() == 0
+    assert env.store.get_watch(CONV.key) is None
+
+
+async def test_background_watch_loop_polls_every_ten_seconds():
+    box = {}
+    env = Env(sandbox_state=status_box(box))
+    sid = await started(env)
+    await end_turn_with_task(env, sid)
+    loop = asyncio.ensure_future(env.core.run_background_watch())
+    await env.settle()
+    box["v"] = stopped_with(env, DONE, at=env.clock.now() + 1)
+    await env.clock.advance(10)
+    await env.settle()
+    assert len(env.sessions.sent) == 2
+    loop.cancel()
+    env.sessions.end_turn(sid)
+    await env.core.wait_idle()
+
+
+async def test_notice_turn_saved_but_bot_dies_before_sending_is_resent_once_after_recovery():
+    box = {}
+    store = BotStore()
+    env = Env(sandbox_state=status_box(box), store=store)
+    sid = await started(env)
+    env.sessions.say(sid, "開始しました")
+    await end_turn_with_task(env, sid)
+    assert env.channel.posts == ["開始しました"]
+    box["v"] = stopped_with(env, DONE)
+    assert await env.core.poll_background() == 1  # 通知用のturnを保存した
+    await env.core.shutdown()  # 最初の指示を送る前に落ちた
+    assert [t for _, t in env.sessions.sent if t.startswith("[自動通知]")] == []
+    env2 = Env(sandbox_state=status_box(box), store=store)
+    env2.sessions, env2.core.sessions = env.sessions, env.sessions
+    assert await env2.core.recover() == 1
+    await env2.settle(30)
+    notices = [t for _, t in env.sessions.sent if t.startswith("[自動通知]")]
+    assert len(notices) == 1  # 復帰したturnが、保存した最初の指示を再送した
+    assert env2.channel.posts == []  # 過去のturnの返答を、再投稿しない
+    assert env2.core.runners[CONV.key].rec.session_id == sid
+    env.sessions.end_turn(sid)
+    await env2.core.wait_idle()
+    assert await env2.core.poll_background() == 0
+    assert store.list_pending() == []
+    assert len([t for _, t in env.sessions.sent if t.startswith("[自動通知]")]) == 1
+
+
+async def test_notice_buffered_behind_a_run_survives_a_failed_flush():
+    box = {}
+    store = BotStore()
+    env = Env(sandbox_state=status_box(box), store=store)
+    sid = await started(env)
+    await end_turn_with_task(env, sid)
+    await env.core.handle(msg("別の依頼"))
+    await env.settle()
+    tid = env.sessions.custom_tool_use(sid, "run", {"command": "sleep 20"})
+    await env.settle()
+    box["v"] = stopped_with(env, DONE)
+    assert await env.core.poll_background() == 1  # runの結果待ちなので、bufferに入るだけ
+    assert len(store.list_pending()) == 1  # 実際に送るまで、保留に残す
+    real = env.sessions.send_message
+
+    async def flaky(session_id, text):
+        if text.startswith("[自動通知]"):
+            raise ConnectionError("down")
+        await real(session_id, text)
+
+    env.sessions.send_message = flaky
+    env.sessions.custom_tool_result(sid, tid, "20秒たちました\n")  # 結果の後のflushが失敗する
+    await env.core.wait_idle()
+    assert [t for _, t in env.sessions.sent if t.startswith("[自動通知]")] == []
+    assert len(store.list_pending()) == 1
+    env.sessions.send_message = real  # 通信の復旧
+    assert await env.core.poll_background() == 1  # 失敗したturnの通知を、もう一度送る
+    await env.settle()
+    assert len([t for _, t in env.sessions.sent if t.startswith("[自動通知]")]) == 1
+    env.sessions.end_turn(sid)  # 失敗した依頼のturn（セッション側では続いている）
+    env.sessions.end_turn(sid)  # 再送した通知のturn
+    await env.core.wait_idle()
+    assert store.list_pending() == []
+
+
+async def test_repeated_identical_instruction_lost_before_sending_is_resent_after_recovery():
+    """過去と同じ文面の依頼を、送信済みと誤認しない（過去の返答の再投稿・即完了を防ぐ）。"""
+    store = BotStore()
+    env = Env(store=store)
+    sid = await started(env, "進捗を教えて")
+    env.sessions.say(sid, "前回の返答")
+    env.sessions.end_turn(sid)
+    await env.core.wait_idle()
+    assert env.channel.posts == ["前回の返答"]
+    await env.core.handle(msg("進捗を教えて"))  # 同じ文面。turnを保存したが、送る前に落ちる
+    await env.core.shutdown()
+    assert env.sessions.sent == [(sid, "進捗を教えて")]
+    env2 = Env(store=store)
+    env2.sessions, env2.core.sessions = env.sessions, env.sessions
+    assert await env2.core.recover() == 1
+    await env2.settle(30)
+    assert env.sessions.sent == [(sid, "進捗を教えて")] * 2  # 今回の依頼を再送した
+    assert env2.channel.posts == []  # 過去の返答を再投稿しない
+    assert not env2.core.runners[CONV.key].done.is_set()
+    env.sessions.say(sid, "今回の返答")
+    env.sessions.end_turn(sid)
+    await env2.core.wait_idle()
+    assert env2.channel.posts == ["今回の返答"]
+
+
+async def test_repeated_instruction_sent_but_bot_died_before_any_event_is_not_resent():
+    store = BotStore()
+    env = Env(store=store)
+    sid = await started(env, "続けて")
+    env.sessions.say(sid, "一回目")
+    env.sessions.end_turn(sid)
+    await env.core.wait_idle()
+    await env.core.handle(msg("続けて"))
+    await env.settle()  # 送信まで進んだ（user.messageのイベントは、まだ処理していない）
+    assert len(env.sessions.sent) == 2
+    await env.core.shutdown()
+    env2 = Env(store=store)
+    env2.sessions, env2.core.sessions = env.sessions, env.sessions
+    assert await env2.core.recover() == 1
+    await env2.settle(30)
+    assert len(env.sessions.sent) == 2  # 二重に送らない
+    env.sessions.say(sid, "二回目")
+    env.sessions.end_turn(sid)
+    await env2.core.wait_idle()
+    assert env2.channel.posts == ["二回目"]
+
+
+async def _lost_before_sending(env_store):
+    """通常のturnの後、新しい依頼を保存して、送る前に落ちた状態を作る。"""
+    env = Env(store=env_store)
+    sid = await started(env, "前の依頼")
+    env.sessions.say(sid, "前の返答")
+    env.sessions.end_turn(sid)
+    await env.core.wait_idle()
+    await env.core.handle(msg("今回の依頼"))
+    await env.core.shutdown()
+    assert env.sessions.sent == [(sid, "前の依頼")]
+    return env, sid
+
+
+async def test_resend_on_recovery_is_not_repeated_by_a_second_restart():
+    store = BotStore()
+    env, sid = await _lost_before_sending(store)
+    env2 = Env(store=store)
+    env2.sessions, env2.core.sessions = env.sessions, env.sessions
+    real = env.sessions.send_message
+    block = asyncio.Event()
+
+    async def accepted_then_stuck(session_id, text):
+        await real(session_id, text)
+        await block.wait()  # セッションは受け付けたが、イベントを処理する前に落ちる
+
+    env.sessions.send_message = accepted_then_stuck
+    assert await env2.core.recover() == 1
+    await env2.settle(30)
+    assert env.sessions.sent[-1] == (sid, "今回の依頼")
+    await env2.core.shutdown()
+    env.sessions.send_message = real
+    env3 = Env(store=store)
+    env3.sessions, env3.core.sessions = env.sessions, env.sessions
+    assert await env3.core.recover() == 1
+    await env3.settle(30)
+    assert [t for _, t in env.sessions.sent] == ["前の依頼", "今回の依頼"]  # 二重に送らない
+    env.sessions.say(sid, "今回の返答")
+    env.sessions.end_turn(sid)
+    await env3.core.wait_idle()
+    assert env3.channel.posts == ["今回の返答"]
+
+
+async def test_instruction_added_after_a_recovery_resend_still_gets_its_reply_posted():
+    store = BotStore()
+    env, sid = await _lost_before_sending(store)
+    env2 = Env(store=store)
+    env2.sessions, env2.core.sessions = env.sessions, env.sessions
+    assert await env2.core.recover() == 1
+    await env2.settle(30)
+    turn = env2.core.runners[CONV.key]
+    assert turn.st.sent == 1 and turn.st.echoed == 1  # 再送も、送信件数に数える
+    await env2.core.handle(msg("追加の依頼"))  # 応答生成中の追加指示（キューされる）
+    await env2.settle()
+    env.sessions.say(sid, "今回の返答")
+    env.sessions.end_turn(sid)
+    await env2.settle()
+    assert not turn.done.is_set()  # キューされた追加指示が続けて処理される
+    env.sessions.say(sid, "追加の返答")
+    env.sessions.end_turn(sid)
+    await env2.core.wait_idle()
+    assert env2.channel.posts == ["今回の返答", "追加の返答"]
+
+
+def test_notice_text_uses_the_task_state():
+    from satin_agent.slack.core import bg_notice_text
+
+    lost = {"id": "t-1-ab12", "command": "sleep 120", "state": "lost", "exit_code": None}
+    text = bg_notice_text([lost])
+    # SIGTERMで消えたタスクを「終了しました」と伝えると、確認せず完了として報告されうる
+    assert "が消失しました" in text and "が終了しました" not in text
+    assert "が終了しました" in bg_notice_text([DONE])
+    assert "が停止しました" in bg_notice_text([{**DONE, "state": "stopped"}])
+    assert "が上限超過しました" in bg_notice_text([{**DONE, "state": "timeout"}])
+    # 状態が読めないときは、これまでどおり「終了」
+    assert "が終了しました" in bg_notice_text([{"id": "t-1-ab12", "command": "x"}])
+
+
+async def test_background_watch_loop_survives_a_store_failure():
+    box = {}
+    env = Env(sandbox_state=status_box(box))
+    sid = await started(env)
+    await end_turn_with_task(env, sid)
+    boom = {"n": 2}
+    original = env.store.list_watches
+
+    def flaky():
+        if boom["n"] > 0:
+            boom["n"] -= 1
+            raise RuntimeError("database is locked")
+        return original()
+
+    env.store.list_watches = flaky
+    loop = asyncio.ensure_future(env.core.run_background_watch())
+    await env.settle()
+    box["v"] = stopped_with(env, DONE, at=env.clock.now() + 1)
+    for _ in range(3):  # 2回失敗しても、ループは次のpollへ進む
+        await env.clock.advance(10)
+        await env.settle()
+    assert not loop.done()
+    assert len(env.sessions.sent) == 2  # 復旧した後に通知が届く
+    loop.cancel()
+    env.sessions.end_turn(sid)
+    await env.core.wait_idle()
+
+
+async def test_poll_background_reports_a_store_failure_instead_of_raising():
+    env = Env(sandbox_state=status_box({}))
+    sid = await started(env)
+    await end_turn_with_task(env, sid)
+
+    def boom():
+        raise RuntimeError("disk full")
+
+    env.store.list_pending = boom
+    assert await env.core.poll_background() == 0  # 例外が呼び出し元へ抜けない
+    env.sessions.end_turn(sid)
+    await env.core.wait_idle()
+
+
+async def test_long_running_task_is_not_dropped_by_elapsed_time():
+    from satin_agent.slack.core import SandboxStatus
+
+    box = {}
+    env = Env(sandbox_state=status_box(box))
+    sid = await started(env)
+    await end_turn_with_task(env, sid)
+    box["v"] = SandboxStatus("running", env.clock.now(), "", (), 0)
+    await env.clock.advance(4 * 3600)
+    assert await env.core.poll_background() == 0
+    assert env.store.get_watch(CONV.key) is not None  # 状態が読めている間は、時間では捨てない
+    box["v"] = stopped_with(env, DONE)
+    assert await env.core.poll_background() == 1
+    await env.settle()
+    assert "t-1-ab12" in env.sessions.sent[-1][1]
+    env.sessions.end_turn(sid)
+    await env.core.wait_idle()
+
+
+async def test_notice_failed_during_a_running_turn_is_retried_by_the_next_poll():
+    box = {}
+    env = Env(sandbox_state=status_box(box))
+    sid = await started(env)
+    await end_turn_with_task(env, sid)
+    await env.core.handle(msg("別の依頼"))  # 応答生成中のturn
+    await env.settle()
+    await env.clock.advance(5)
+    box["v"] = stopped_with(env, DONE)
+    real = env.sessions.send_message
+    broken = {"v": True}
+
+    async def flaky(session_id, text):
+        if broken["v"] and text.startswith("[自動通知]"):
+            raise ConnectionError("down")
+        await real(session_id, text)
+
+    env.sessions.send_message = flaky
+    await env.core.poll_background()
+    assert env.store.list_pending()[0]["turn_id"] == ""  # 担当を外して、再送できるようにする
+    broken["v"] = False
+    assert await env.core.poll_background() == 1
+    assert [t for _, t in env.sessions.sent if t.startswith("[自動通知]")]
+    env.sessions.end_turn(sid)
+    await env.core.wait_idle()

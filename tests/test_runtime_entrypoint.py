@@ -200,3 +200,148 @@ async def test_cc_places_skills_and_claude_md_from_the_bundle_and_runs_startup(
     assert (host / "CLAUDE.md").read_text() == "# rules\n"
     assert (tmp_path / "ws" / "startup-ran").read_text().strip() == "cc"
     assert seen and seen[0].host_config_dir == str(host)
+
+
+@pytest.fixture
+def bg(tmp_path):
+    from anthropic.lib.tools.agent_toolset import AgentToolContext
+
+    from satin_agent.runtime import bgtools
+
+    ctx = AgentToolContext(workdir=str(tmp_path / "ws"))
+    (tmp_path / "ws").mkdir()
+    mgr = bgtools.create_manager(ctx, {}, hold=lambda: None, release=lambda: None)
+    yield mgr
+    bgtools.reset()
+
+
+async def test_cma_reports_unnotified_finished_tasks_in_termination_message(tmp_path, bg):
+    import json
+
+    from satin_agent.runtime.modes import run_cma
+
+    log = tmp_path / "termination-log"
+
+    async def handler(work, workdir, max_idle):
+        t = await bg.start("echo hi; exit 5")
+        await bg.wait(t.id, 5)
+
+    assert (
+        await run_cma(
+            CmaWork("w", "S1", "env", "s"),
+            workdir=str(tmp_path),
+            handler=handler,
+            termination_log=log,
+        )
+        == 0
+    )
+    [item] = json.loads(log.read_text())["finished_tasks"]
+    assert item["exit_code"] == 5 and item["state"] == "exited" and item["id"].startswith("t-1-")
+
+
+async def test_cma_writes_nothing_when_no_task_is_pending(tmp_path, bg):
+    from satin_agent.runtime.modes import run_cma
+
+    log = tmp_path / "termination-log"
+
+    async def handler(work, workdir, max_idle):
+        t = await bg.start("true")
+        await bg.wait(t.id, 5)
+        bg.get(t.id).notified = True  # task_statusで伝えた
+
+    await run_cma(
+        CmaWork("w", "S1", "env", "s"), workdir=str(tmp_path), handler=handler, termination_log=log
+    )
+    assert not log.exists()
+
+
+async def test_cma_termination_message_falls_back_to_a_count_over_4kb(tmp_path, bg):
+    import json
+
+    from satin_agent.runtime.modes import run_cma
+
+    log = tmp_path / "termination-log"
+
+    async def handler(work, workdir, max_idle):
+        for _ in range(3):
+            t = await bg.start("echo " + "x" * 70 + "; sleep 0")
+            await bg.wait(t.id, 5)
+        for t in list(bg._tasks.values()):  # 長いコマンドが多数ある状態にする
+            t.command = "c" * 80
+        bg._tasks.update(
+            {
+                f"t-9{i}-aaaa": type(t)(f"t-9{i}-aaaa", "c" * 80, "/", 0.0, "exited", exit_code=0)
+                for i in range(60)
+            }
+        )
+
+    await run_cma(
+        CmaWork("w", "S1", "env", "s"), workdir=str(tmp_path), handler=handler, termination_log=log
+    )
+    assert json.loads(log.read_text()) == {"finished_count": 63}
+
+
+async def test_cma_sigterm_stops_running_tasks_and_records_them_lost(tmp_path, bg):
+    import json
+
+    from satin_agent.runtime.modes import run_cma
+
+    log = tmp_path / "termination-log"
+    started, stop = asyncio.Event(), asyncio.Event()
+
+    async def handler(work, workdir, max_idle):
+        t = await bg.start("sleep 600")
+        started.set()
+        await bg.wait(t.id, 30)  # タスクが止まると、ワーカーはアイドルで終われる
+        stop.set()
+
+    task = asyncio.create_task(
+        run_cma(
+            CmaWork("w", "S1", "env", "s"),
+            workdir=str(tmp_path),
+            handler=handler,
+            grace=10,
+            termination_log=log,
+        )
+    )
+    await started.wait()
+    [t] = bg.running()
+    os.kill(os.getpid(), signal.SIGTERM)
+    assert await asyncio.wait_for(task, 15) == 0
+    assert bg.get(t.id).state == "lost"
+    assert json.loads(log.read_text())["finished_tasks"][0]["state"] == "lost"
+
+
+async def test_cma_sigterm_task_shutdown_counts_against_the_same_grace(tmp_path, bg):
+    """停止処理が長くても、猶予（grace）を超えて待たない（Podの猶予60秒を超えないため）。"""
+    from satin_agent.runtime.modes import run_cma
+
+    release, exits = asyncio.Event(), []
+
+    async def slow_shutdown():
+        await asyncio.sleep(5)
+
+    bg.shutdown = slow_shutdown
+
+    async def handler(work, workdir, max_idle):
+        await release.wait()
+
+    task = asyncio.create_task(
+        run_cma(
+            CmaWork("w", "S1", "env", "s"),
+            workdir=str(tmp_path),
+            handler=handler,
+            grace=0.3,
+            hard_exit=exits.append,
+            termination_log=tmp_path / "log",
+        )
+    )
+    await asyncio.sleep(0.05)
+    os.kill(os.getpid(), signal.SIGTERM)
+    loop = asyncio.get_running_loop()
+    t0 = loop.time()
+    try:
+        assert await asyncio.wait_for(task, 3) == 143
+        assert loop.time() - t0 < 1.0 and exits == [143]
+    finally:
+        release.set()

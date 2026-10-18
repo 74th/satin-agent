@@ -13,7 +13,12 @@ from satin_agent.sandbox.naming import LABEL_SESSION, session_hash
 
 RESULTS_DIR = Path("results")
 # Sandbox内のワーカーは`user.tool_result`で結果を返す。サーバ側の結果（中断・MCP）は`agent.*`。
-TOOL_RESULT_TYPES = ("user.tool_result", "agent.tool_result", "agent.mcp_tool_result")
+TOOL_RESULT_TYPES = (
+    "user.tool_result",
+    "agent.tool_result",
+    "agent.mcp_tool_result",
+    "user.custom_tool_result",  # run・task_*（Sandbox内のワーカーが実行するカスタムツール）
+)
 
 
 # --- 判定 ---

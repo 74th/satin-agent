@@ -21,7 +21,7 @@ from ..sandbox.manager import (
 )
 from ..sandbox.naming import ANN_SESSION_ID, LABEL_MODE
 from .ports import WorkItem, WorkSource
-from .states import StatePublisher
+from .states import StatePublisher, parse_finished_tasks
 from .users import UserDirectory
 
 log = logging.getLogger("satin.cma")
@@ -186,7 +186,7 @@ class CmaOrchestrator:
                     sid, "failed", "ワーカーが処理を完了できませんでした（Podの異常終了の後）"
                 )
             elif info.exit_code == 0:
-                await self._publish(sid, "stopped")
+                await self._publish(sid, "stopped", message=info.message)
             else:
                 await self._publish(sid, "failed", f"exit code {info.exit_code}")
         except asyncio.CancelledError:
@@ -219,10 +219,15 @@ class CmaOrchestrator:
             sid,
             "stopped" if info.exit_code == 0 else "failed",
             None if info.exit_code == 0 else f"exit code {info.exit_code}",
+            message=info.message if info.exit_code == 0 else "",
         )
 
-    async def _publish(self, sid: str, state: str, error: str | None = None) -> None:
+    async def _publish(
+        self, sid: str, state: str, error: str | None = None, message: str = ""
+    ) -> None:
+        """状態を公開する。`message`は、ワーカーの終了メッセージ（バックグラウンドのタスクの報告）。"""
         if self.states is None:
             return
+        tasks, count = parse_finished_tasks(message)
         with contextlib.suppress(Exception):  # 表示用。失敗しても処理は続ける
-            await self.states.set(sid, state, error)
+            await self.states.set(sid, state, error, tasks, count)

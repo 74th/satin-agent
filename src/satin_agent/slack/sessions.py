@@ -75,6 +75,11 @@ class AnthropicSessions:
             out.append(ev.model_dump())
         return out
 
+    async def last_event_id(self, session_id: str) -> str:
+        async for ev in self._c.beta.sessions.events.list(session_id, limit=1, order="desc"):
+            return ev.id
+        return ""
+
     async def status(self, session_id: str) -> dict[str, Any]:
         s = await self._c.beta.sessions.retrieve(session_id)
         d = s.model_dump()

@@ -38,6 +38,14 @@ kubectl --context $C -n satin-sandboxes get sandbox,pod
 | 5 | `@bot bashで cat a.txt と grep -rn 'def main' . を実行して` | どちらも許可されて実行される |
 | 6 | Botのログ（監査フック）を確認 | 1〜5がJSON Linesで記録されている（本文は既定で出ない） |
 
+## 10.5b Slackで(A)のバックグラウンド実行（`run`・`task_*`。配備の順序はREADME「バックグラウンド実行」）
+
+| # | 操作 | 合格の条件 |
+| --- | --- | --- |
+| 1 | `@bot runツールで sleep 120 を実行して`（待ち時間を超えてバックグラウンドへ回った後に）「終わったらdateも実行して」 | 追加指示は中断なしで処理される（進捗に⏹が出ない、「追加の指示: 1件」）。進捗にバックグラウンドで実行中のタスクが🔄で出て、完了の表示にも残りの件数が出る |
+| 2 | 1のタスクが終わるまで待つ（turnは終わっている） | 約2分後、タスクの終了がスレッドに報告される（自動通知を受けたエージェントの返答）。同じ内容が2回は報告されない |
+| 3 | 2の後、`kubectl --context $C -n satin-system rollout restart deploy/satin-slack-bot`をして、新しいタスク（`sleep 90`）を待つ | 再起動後のBotも、タスクの終了を1回だけ報告する |
+
 ## 10.6 claude.aiで(B)（self-hosted Environmentを選んでセッションを始める）
 
 | # | 操作 | 合格の条件 |

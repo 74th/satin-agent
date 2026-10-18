@@ -36,6 +36,14 @@ CREATE TABLE IF NOT EXISTS turns (
   last_event_id TEXT NOT NULL DEFAULT '',
   started_at REAL NOT NULL, state TEXT NOT NULL DEFAULT '{}');
 CREATE INDEX IF NOT EXISTS turns_status ON turns(status);
+CREATE TABLE IF NOT EXISTS bg_watch (
+  conv_key TEXT PRIMARY KEY, session_id TEXT NOT NULL, since REAL NOT NULL,
+  tasks TEXT NOT NULL DEFAULT '[]');
+CREATE TABLE IF NOT EXISTS bg_pending (
+  id INTEGER PRIMARY KEY AUTOINCREMENT, conv_key TEXT NOT NULL, session_id TEXT NOT NULL,
+  text TEXT NOT NULL, turn_id TEXT NOT NULL DEFAULT '');
+CREATE TABLE IF NOT EXISTS bg_notified (
+  session_id TEXT NOT NULL, task_id TEXT NOT NULL, PRIMARY KEY (session_id, task_id));
 """
 
 
@@ -67,6 +75,107 @@ class BotStore:
                 (conv_key, session_id, email, now),
             )
             self._db.commit()
+
+    # --- バックグラウンドのタスクの終了の通知 ---
+    def set_watch(self, conv_key: str, session_id: str, since: float, tasks: list[str]) -> None:
+        """最後のturnの後もバックグラウンドで動いているタスクがあるスレッドを記録する。"""
+        with self._lock:
+            self._db.execute(
+                "INSERT OR REPLACE INTO bg_watch(conv_key, session_id, since, tasks)"
+                " VALUES(?,?,?,?)",
+                (conv_key, session_id, since, json.dumps(tasks)),
+            )
+            self._db.commit()
+
+    def get_watch(self, conv_key: str) -> dict[str, Any] | None:
+        with self._lock:
+            r = self._db.execute("SELECT * FROM bg_watch WHERE conv_key=?", (conv_key,)).fetchone()
+        return self._watch(r) if r else None
+
+    def list_watches(self) -> list[dict[str, Any]]:
+        with self._lock:
+            rows = self._db.execute("SELECT * FROM bg_watch ORDER BY since").fetchall()
+        return [self._watch(r) for r in rows]
+
+    def delete_watch(self, conv_key: str) -> None:
+        with self._lock:
+            self._db.execute("DELETE FROM bg_watch WHERE conv_key=?", (conv_key,))
+            self._db.commit()
+
+    def add_notice(
+        self,
+        conv_key: str,
+        session_id: str,
+        task_ids: list[str],
+        text: str,
+        remaining: list[str],
+        since: float,
+    ) -> None:
+        """通知の本文（未送信）、通知済み、監視の更新を、1つのトランザクションで記録する。"""
+        with self._lock:
+            self._db.execute(
+                "INSERT INTO bg_pending(conv_key, session_id, text) VALUES(?,?,?)",
+                (conv_key, session_id, text),
+            )
+            self._db.executemany(
+                "INSERT OR IGNORE INTO bg_notified(session_id, task_id) VALUES(?,?)",
+                [(session_id, t) for t in task_ids],
+            )
+            if remaining:
+                self._db.execute(
+                    "INSERT OR REPLACE INTO bg_watch(conv_key, session_id, since, tasks)"
+                    " VALUES(?,?,?,?)",
+                    (conv_key, session_id, since, json.dumps(remaining)),
+                )
+            else:
+                self._db.execute("DELETE FROM bg_watch WHERE conv_key=?", (conv_key,))
+            self._db.commit()
+
+    def list_pending(self) -> list[dict[str, Any]]:
+        with self._lock:
+            rows = self._db.execute("SELECT * FROM bg_pending ORDER BY id").fetchall()
+        return [dict(r) for r in rows]
+
+    def set_pending_turn(self, pending_id: int, turn_id: str) -> None:
+        with self._lock:
+            self._db.execute("UPDATE bg_pending SET turn_id=? WHERE id=?", (turn_id, pending_id))
+            self._db.commit()
+
+    def delete_pending_by_text(self, session_id: str, text: str) -> None:
+        with self._lock:
+            self._db.execute(
+                "DELETE FROM bg_pending WHERE session_id=? AND text=?", (session_id, text)
+            )
+            self._db.commit()
+
+    def delete_pending(self, pending_id: int) -> None:
+        with self._lock:
+            self._db.execute("DELETE FROM bg_pending WHERE id=?", (pending_id,))
+            self._db.commit()
+
+    def mark_notified(self, session_id: str, task_ids: list[str]) -> None:
+        with self._lock:
+            self._db.executemany(
+                "INSERT OR IGNORE INTO bg_notified(session_id, task_id) VALUES(?,?)",
+                [(session_id, t) for t in task_ids],
+            )
+            self._db.commit()
+
+    def is_notified(self, session_id: str, task_id: str) -> bool:
+        with self._lock:
+            r = self._db.execute(
+                "SELECT 1 FROM bg_notified WHERE session_id=? AND task_id=?", (session_id, task_id)
+            ).fetchone()
+        return r is not None
+
+    @staticmethod
+    def _watch(r: sqlite3.Row) -> dict[str, Any]:
+        return {
+            "conv_key": r["conv_key"],
+            "session_id": r["session_id"],
+            "since": r["since"],
+            "tasks": json.loads(r["tasks"]),
+        }
 
     # --- turns ---
     def save_turn(self, t: TurnRecord) -> None:

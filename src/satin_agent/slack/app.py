@@ -113,7 +113,14 @@ def sandbox_state_from_configmap(kube: Any) -> SandboxState:
         if not raw:
             return None
         d = json.loads(raw)
-        return SandboxStatus(d.get("state", ""), float(d.get("at", 0.0)), d.get("error", ""))
+        return SandboxStatus(
+            d.get("state", ""),
+            float(d.get("at", 0.0)),
+            d.get("error", ""),
+            tuple(d.get("finished_tasks") or ()),
+            int(d.get("finished_count") or 0),
+            float(d.get("finished_count_at") or 0.0),
+        )
 
     return state
 
@@ -198,6 +205,7 @@ async def run_bot(cfg: Config, env: Mapping[str, str] | None = None) -> int:
         receiver.register()
         recovered = await core.recover()  # 前回のBotが実行中のまま残したturnを引き継ぐ
         log.info("recovered %d turn(s)", recovered)
+        bg_watch = asyncio.ensure_future(core.run_background_watch())  # タスクの終了の通知
         handler = AsyncSocketModeHandler(app, e["SLACK_APP_TOKEN"])
         stop = asyncio.Event()
         loop = asyncio.get_running_loop()
@@ -206,6 +214,7 @@ async def run_bot(cfg: Config, env: Mapping[str, str] | None = None) -> int:
         await handler.connect_async()
         await stop.wait()
         await handler.close_async()
+        bg_watch.cancel()
         await receiver.wait_idle()
         await core.shutdown()
         await dispatcher.aclose()

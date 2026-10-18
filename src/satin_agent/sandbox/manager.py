@@ -66,6 +66,7 @@ class ExitInfo:
     name: str
     exit_code: int | None
     reason: str
+    message: str = ""  # コンテナの終了メッセージ（/dev/termination-log、4KBまで）
 
 
 def _cond(obj: dict[str, Any], typ: str) -> dict[str, Any] | None:
@@ -326,6 +327,7 @@ class SandboxManager:
     async def exit_info(self, sb: dict[str, Any]) -> ExitInfo:
         ready = _cond(sb, "Ready") or {}
         code: int | None = None
+        message = ""
         sel = sb.get("status", {}).get("selector")
         if sel:
             for pod in await self.kube.list("pod", sel):
@@ -333,9 +335,10 @@ class SandboxManager:
                     t = cs.get("state", {}).get("terminated")
                     if t is not None:
                         code = int(t.get("exitCode", 0))
+                        message = t.get("message") or ""
         if code is None:
             code = 0 if ready.get("reason") == "PodSucceeded" else None
-        return ExitInfo(sb["metadata"]["name"], code, ready.get("reason", ""))
+        return ExitInfo(sb["metadata"]["name"], code, ready.get("reason", ""), message)
 
     async def wait_exit(self, session_id: str, name: str) -> ExitInfo:
         """Podの終了を待つ。watchが切れたら再取得してやり直す。終了したらSandboxを停止する。"""

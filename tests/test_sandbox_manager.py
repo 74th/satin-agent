@@ -259,3 +259,14 @@ async def test_resume_matches_identity_from_the_sandbox_env_not_from_a_stored_ha
     )
     await mgr.suspend(r.name)
     assert (await mgr.ensure_started(req())).action == "resumed"
+
+
+async def test_exit_info_reads_the_termination_message():
+    mgr, kube, _, _ = make()
+    r = await mgr.ensure_started(req())
+    await kube.pod_ready(r.name)
+    await kube.pod_exit(r.name, 0, '{"finished_tasks": []}')
+    info = await mgr.exit_info(await kube.get("sandbox", r.name))
+    assert info.exit_code == 0 and info.message == '{"finished_tasks": []}'
+    await kube.pod_exit(r.name, 0)
+    assert (await mgr.exit_info(await kube.get("sandbox", r.name))).message == ""

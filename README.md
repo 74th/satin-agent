@@ -53,7 +53,7 @@ Anthropicの組織スコープのAPIキーは、Botの外には置かない（�
 
 ### Managed Agentsの制約（検証で確認、design.md D10）
 
-- ツール実行・確認待ちの間は`user.message`が拒否される → Botが追加指示を保持し、ツール完了の直後に送る。
+- ツール実行・確認待ちの間は`user.message`が拒否される → Botが追加指示を保持する。組み込みのbashなどの実行中は、`user.interrupt`でツールを中断してから送る。ワーカーが提供する`run`・`task_*`（最長60秒で返る）の実行中は、中断せずに、結果が返った直後に送る。
 - 停止は`user.interrupt`。
 - 検証の結果と、見つけて直した不具合は`docs/verification.md`。
 - `agent_toolset`の権限は、既定を`always_allow`にして、bashだけ`always_ask`にする。
@@ -99,6 +99,28 @@ uv run ruff check . && uv run ruff format --check . && uv run pyrefly check
 
 Managed Agentsの`bash`は、SDKの既定では、`timeout_ms`未指定で120秒、**1回のツール呼び出し全体が150秒**で打ち切られる。長いクエリ向けに、Sandboxの起動時に上書きしている（設定`sandbox.bash_default_timeout_seconds`（既定3600）・`sandbox.bash_max_timeout_seconds`（既定7200））。`timeout_ms`を指定すれば、その値が使われる（上限まで）。(B)には`BASH_DEFAULT_TIMEOUT_MS` / `BASH_MAX_TIMEOUT_MS`で渡す（200秒・12分のコマンドで確認済み）。
 
+## バックグラウンド実行（`run`・`task_*`）
+
+(A)のAgentには、組み込みのツールのほかに、Sandbox内のワーカーが実行するカスタムツールを4つ宣言する（`satin publish --target cma`）。
+
+| ツール | 動き |
+| --- | --- |
+| `run(command, cwd, wait_seconds)` | コマンドを別プロセスで起動する。待ち時間（既定30秒、上限60秒）以内に終われば結果を返し、終わらなければ**止めずに**タスクIDを返してバックグラウンドで動かし続ける。終了コードが0以外ならエラーの結果。 |
+| `task_status(task_id)` | 状態（実行中・終了・停止・上限超過・消失）、終了コード、経過時間、出力の末尾。IDを省略するとすべて。 |
+| `task_wait(task_id, seconds)` | 終わるか指定秒（上限60）が過ぎるまで待つ。 |
+| `task_stop(task_id)` | プロセスと子プロセスをすべて止める。 |
+
+- 出力は`/workspace/.satin/tasks/<id>/output.log`に全部書き、結果には末尾だけを返す。記録（`meta.json`）はPVCにあるので、Sandboxが停止して再開しても`task_status`で読める。
+- タスクが動いている間は、ワーカーはturnが終わってもアイドルで終了せず、Sandboxも停止しない（SDKの`_IdleClock`の`hold()`を使う）。全部終わると、通常のアイドル停止に戻る。**タスクを待つSandboxは、同時に動くSandboxの数（既定5）に数えられる**。
+- 終了の知らせ: turnの途中で終わったら、次のツール結果の末尾に`[satin]`の行を1回だけ付ける。turnの外で終わったら、ワーカーが終了時に終了メッセージ（`/dev/termination-log`）へ書き、オーケストレータがConfigMapに公開し、Botが約10秒以内にセッションへ`[自動通知]`のメッセージを送って、新しいturnを始める（Botが再起動しても2回は送らない）。
+- Botは、`run`・`task_*`の実行中に受けた追加指示を、中断せずに結果の後に送る。進捗メッセージには、バックグラウンドで動いているタスクの数が出る。
+- 設定（`sandbox.env`でSandboxの環境変数として渡す）: `SATIN_BG_MAX_TASKS`（同時に動かせる数、既定4）、`SATIN_BG_MAX_SECONDS`（1つの上限時間、既定7200）、`SATIN_BG_DEFAULT_WAIT`（`run`の既定の待ち、既定30、上限60）。
+- **`run`はBotのbashの実行前確認（一括取り出しの拒否）を通らない**。カスタムツールには権限ポリシー（`always_ask`）が効かないため。Sandbox内で実行されることから許容している。監査フックには`agent.custom_tool_use`として現れる。
+- `run`の環境変数・利用者は組み込みのbashと同じ（`ANTHROPIC_*`は除く）。標準入力は空。
+- `run`のシェルが終わったとき、同じプロセスグループに残った子プロセス（`cmd &`など）は止められる（結果に注記が付く）。タスクとして動かし続けたいものは、シェルを終わらせずに実行する。
+- **配布の順序**: 新しいランタイムイメージ（ツールを提供するワーカー）を先に入れ、`scripts/deploy.sh`で入れ替えてから、`satin publish --target cma`でAgentにツールを足す。逆にすると、エージェントが提供されないツールを呼んで、セッションが`requires_action`のまま止まる。戻すときは、Agentを戻してから（`agent_config`を戻して`satin publish`）、イメージを戻す。
+- SDKの内部（`_IdleClock`）に依存する。SDKを上げるときは、`tests/test_runtime_idle.py`が通ることを確かめる。
+
 ## アセットの配布とカスタマイズ
 
 ```
@@ -118,7 +140,7 @@ assets/
 ## 既知の制限
 
 - **セッション専用の秘密はツールから見える**: (A)のwork secretはマウントしたファイル、(B)のセッショントークンは環境変数として、同じユーザのツールから読める。どちらもそのセッション専用の短命な値で、Sandboxの外への通信はFQDNNetworkPolicyで制限する。環境変数には置かず、(A)はファイルから読んで引数で渡す。
-- ツール実行中は追加指示を送れない。ツールを`user.interrupt`で中断してから送る（止めずに届ける方法がない）。
+- 組み込みのbashなどの実行中は追加指示を送れない。ツールを`user.interrupt`で中断してから送る（止めずに届ける方法がない）。長いコマンドは`run`（バックグラウンド実行、下記）を使うと、中断せずに届く。
 - ツール実行中にSandboxのPodが消えたとき、猶予内に終わらないツールは、自動で回復するか、失敗が公開される（Botは通知して次の依頼を受けられる）。落ちたワーカーのリースがサーバ側で約5分残る。詳細は`docs/verification.md`とdesign.md。
 - (B)にはガード類がない。
 - 単一レプリカ（Botは1インスタンス前提でSQLite）。

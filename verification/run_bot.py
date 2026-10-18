@@ -398,6 +398,85 @@ async def bot_kill_pod_during_tool() -> ScenarioResult:
     return r
 
 
+# ------------------------------------------------------- バックグラウンド実行（run・task_*）
+async def _session_events(rig: Rig) -> list[dict[str, Any]]:
+    client = AsyncAnthropic(api_key=anthropic_api_key())
+    return [e.model_dump() async for e in client.beta.sessions.events.list(rig.session_id or "")]
+
+
+async def bg_append_no_interrupt() -> ScenarioResult:
+    """`run`の実行中の追加指示は、中断せずに結果の後に処理される。"""
+    r = result("bg_append_no_interrupt")
+    rig = Rig({"input_guard": {"enabled": False}, "output_inspection": {"enabled": False}})
+    await rig.start()
+    await rig.say(
+        "runツールで `sleep 40; echo bg-ok` を wait_seconds=60 で実行して、結果を報告して"
+    )
+    ran = await rig.wait_for(
+        lambda: "run" in rig.channel.last_progress() and "⏳" in rig.channel.last_progress()
+    )
+    await rig.say("終わったらdateも実行して")
+    done = await rig.wait_done(300)
+    evs = await _session_events(rig)
+    interrupts = [e for e in evs if e["type"] == "user.interrupt"]
+    reply = "\n".join(rig.channel.posts)
+    history = "\n".join(rig.channel.progress_history())
+    mentions = jev_mentions(reply, "dateコマンドの実行結果（日時）")
+    r.passed = (
+        ran
+        and done
+        and not interrupts
+        and "⏹" not in history
+        and "追加の指示: 1件" in history
+        and mentions > 0.3
+    )
+    r.observed = (
+        f"runの実行中の追加指示を、user.interrupt={len(interrupts)}件・中断の表示なしで処理し、"
+        f"dateの結果を報告（Jev noul={mentions:.2f}）"
+    )
+    r.evidence = {"jev_noul": mentions, "reply": reply[:160], "session": rig.session_id}
+    await rig.hooks()
+    return r
+
+
+async def bg_notice_after_turn() -> ScenarioResult:
+    """turnの後に終わったタスクを、Botがセッションへ知らせ、エージェントが報告する（1回だけ）。"""
+    r = result("bg_notice_after_turn")
+    rig = Rig({"input_guard": {"enabled": False}, "output_inspection": {"enabled": False}})
+    await rig.start()
+    watch = asyncio.ensure_future(rig.core.run_background_watch())
+    await rig.say(
+        "runツールで `sleep 60; echo bg-ok` を wait_seconds=5 で実行してください。"
+        "バックグラウンドに回ったら、待たずにすぐturnを終えて「開始しました」とだけ答えてください。"
+    )
+    first = await rig.wait_done(240)
+    watching = rig.store.get_watch(rig.conv.key) is not None
+    # タスクが終わり、Sandboxが停止し、Botが知らせて、エージェントが報告する
+    reported = await rig.wait_for(lambda: any("bg-ok" in p for p in rig.channel.posts), 300)
+    await rig.wait_done(120)
+    await asyncio.sleep(30)  # 2回目の知らせが来ないこと
+    evs = await _session_events(rig)
+    notices = [
+        e
+        for e in evs
+        if e["type"] == "user.message"
+        and "[自動通知]" in "".join(b.get("text", "") for b in e.get("content") or [])
+    ]
+    watch.cancel()
+    r.passed = first and watching and reported and len(notices) == 1
+    r.observed = (
+        f"turn終了後も監視={watching}、タスクの終了を自動通知{len(notices)}件（1件であるべき）、"
+        f"エージェントの報告にbg-okが含まれた={reported}"
+    )
+    r.evidence = {
+        "session": rig.session_id,
+        "posts": [p[:120] for p in rig.channel.posts],
+        "notice_events": [e["id"] for e in notices],
+    }
+    await rig.hooks()
+    return r
+
+
 SCENARIOS: dict[str, Callable[[], Awaitable[ScenarioResult]]] = {
     "guard_input_block": guard_input_block,
     "guard_gemini_failure": guard_gemini_failure,
@@ -409,6 +488,8 @@ SCENARIOS: dict[str, Callable[[], Awaitable[ScenarioResult]]] = {
     "stop_word": stop_word,
     "append_interrupt": append_interrupt,
     "bot_kill_pod_during_tool": bot_kill_pod_during_tool,
+    "bg_append_no_interrupt": bg_append_no_interrupt,
+    "bg_notice_after_turn": bg_notice_after_turn,
 }
 
 
